@@ -38,7 +38,7 @@ budgeting) built in rather than bolted on.
 | Context growth | Token-budgeted context manager, head+tail context compaction between agents |
 | Memory | Episodic + semantic + procedural, TF-IDF recall, atomic JSON persistence |
 | Safety | Direct + indirect (tool-output) injection scans, PII redaction, output caps, deny-by-default tool approval, path sandbox that survives symlinks and sibling prefixes, SSRF gate, credential-free child env |
-| Cost | Per-run token and USD accounting, cheapest/quality/fast routing modes |
+| Cost | Per-run token and USD accounting (failed runs included), cheapest/quality/fast routing modes, optional hard cap via `models.max_cost_usd` / `APEX_MAX_COST_USD` |
 | Debuggability | Nested spans, counters/histograms, structured JSON logs, `/v1/traces` grouped by trace |
 | Quality | Critic loop with retry-on-low-score, plus an 11-task eval suite — three tasks execute the generated code in a sandbox and probe the results — gateable in CI with `--min-pass-rate` |
 
@@ -46,7 +46,7 @@ budgeting) built in rather than bolted on.
 
 ```bash
 pip install -e .          # or: pip install -e ".[dev]" for pytest/ruff
-python -m unittest discover -s tests    # 404 tests, no network, no keys
+python -m unittest discover -s tests    # 412 tests, no network, no keys
 ```
 
 Python 3.10+. Zero hard dependencies.
@@ -186,13 +186,14 @@ Offline it scores **100% pass, ~0.89 mean** — a regression baseline for the ha
 | Memory file unwritable | Warning logged, run continues (persistence is best-effort) |
 | Memory file corrupt | Ignored on load, harness starts clean instead of crashing |
 | API saturated | `503 overloaded` + `Retry-After`, not an unbounded queue |
+| Spend cap reached | Run stops before the next model call, reports what it spent |
 | Crash | JSON checkpoint per run |
 | Corrupt memory file | Ignored on load; harness starts clean |
 
 ## Testing
 
 ```bash
-python -m unittest discover -s tests -v     # 404 tests
+python -m unittest discover -s tests -v     # 412 tests
 python -m pytest tests -q                   # if pytest is installed
 ruff check apex tests
 ```

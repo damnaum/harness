@@ -32,6 +32,7 @@ threads.
 | `APEX_API_TOKEN` | If set, every HTTP route requires `Authorization: Bearer <token>` | unset |
 | `APEX_CORS_ORIGIN` | `Access-Control-Allow-Origin` value | `*` |
 | `APEX_MAX_CONCURRENCY` | Simultaneous `/v1/run` requests before `503` | `4` |
+| `APEX_MAX_COST_USD` | Hard per-run spend cap; `0` disables | `0` |
 | `APEX_LOG_LEVEL` | `DEBUG` \| `INFO` \| `WARN` \| `ERROR` | `INFO` |
 | `APEX_CONFIG` | Config file path (JSON or simple YAML) | unset |
 | `APEX_MODEL`, `APEX_ROUTER_MODE`, `APEX_MAX_STEPS`, `APEX_PLAN_STEPS` | Direct overrides | profile defaults |

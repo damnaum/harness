@@ -24,6 +24,9 @@ class ModelConfig:
     max_retries: int = 3
     retry_base_delay: float = 0.5
     timeout_seconds: float = 120.0
+    # Hard per-run spend cap in USD; 0 disables the cap. A long ReAct loop on a
+    # frontier model can otherwise cost more than the task is worth.
+    max_cost_usd: float = 0.0
 
 
 @dataclass
@@ -144,6 +147,7 @@ class ApexConfig:
             "WORKSPACE": (None, "workspace", str),
             "MODEL": ("models", "default_model", str),
             "ROUTER_MODE": ("models", "router_mode", str),
+            "MAX_COST_USD": ("models", "max_cost_usd", float),
             "CHECKPOINT_DIR": (None, "checkpoint_dir", str),
             "SESSION_ID": (None, "session_id", str),
             "LOG_LEVEL": ("observability", "log_level", str),

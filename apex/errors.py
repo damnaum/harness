@@ -30,6 +30,12 @@ class ContextOverflowError(ModelError):
     code = "context_overflow"
 
 
+class BudgetExceededError(ApexError):
+    """The run spent its configured USD budget (``models.max_cost_usd``)."""
+
+    code = "budget_exceeded"
+
+
 class ToolError(ApexError):
     code = "tool_error"
 

@@ -160,6 +160,10 @@ class ApexHarness:
         # Per-run warning buffer (deduplicated inside _warn_once).
         self._warn_seen = set()
         self._warn_buffer = []
+        # Usage so far, so a failed run still reports what it spent. Billing and
+        # alerting that only count successful runs under-report exactly the runs
+        # you care about.
+        self._last_usage: tuple[int, int, float, str] = (0, 0, 0.0, "")
 
         with self.tracer.span("harness.run", task=task_description[:120]):
             # 1. safety on input
@@ -262,11 +266,15 @@ class ApexHarness:
             except Exception as exc:  # noqa: BLE001 - harness never crashes the caller
                 self.logger.error("harness run failed", error=str(exc))
                 self._emit("run_failed", error=str(exc))
+                spent_in, spent_out, spent_cost, spent_model = getattr(
+                    self, "_last_usage", (0, 0, 0.0, "")
+                )
                 return HarnessResult(
-                    task_id=task_id, output="", success=False, model_used=model_used,
+                    task_id=task_id, output="", success=False,
+                    model_used=spent_model or model_used,
                     strategy=chosen_strategy, plan=plan, agent_results=agent_results,
-                    total_tokens_in=tokens_in, total_tokens_out=tokens_out,
-                    total_cost_usd=total_cost, duration_ms=(time.time() - start) * 1000,
+                    total_tokens_in=spent_in, total_tokens_out=spent_out,
+                    total_cost_usd=spent_cost, duration_ms=(time.time() - start) * 1000,
                     trace_id=trace_id,
                     warnings=[str(exc)] + list(getattr(self, "_warn_buffer", []) or []),
                 )
@@ -344,6 +352,7 @@ class ApexHarness:
         * Reflexion revision loop bounded by the strategy's reflection budget;
         * correct assistant/tool message shapes so native tool calling works.
         """
+        from .errors import BudgetExceededError
         from .reasoning.strategies import best_of_n, extract_final, majority_vote
         from .types import Message
 
@@ -365,13 +374,22 @@ class ApexHarness:
         cost = 0.0
         model_used = decision.model.id
 
+        budget = float(getattr(self.config.models, "max_cost_usd", 0.0) or 0.0)
+
         def call(messages, temperature):
             nonlocal tokens_in, tokens_out, cost, model_used
+            if budget > 0 and cost >= budget:
+                self._emit("budget_exceeded", spent=round(cost, 6), budget=budget)
+                raise BudgetExceededError(
+                    f"cost budget exceeded: spent ${cost:.4f} of ${budget:.4f} "
+                    f"— raise models.max_cost_usd (APEX_MAX_COST_USD) or use a cheaper route"
+                )
             resp, used = self._complete_with_fallback(decision, messages, tools=tools, temperature=temperature)
             tokens_in += resp.tokens_in
             tokens_out += resp.tokens_out
             cost += resp.cost_usd
             model_used = used.id
+            self._last_usage = (tokens_in, tokens_out, cost, model_used)
             return resp
 
         def solve_once() -> str:
