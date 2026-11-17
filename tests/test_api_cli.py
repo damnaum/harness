@@ -377,8 +377,16 @@ class TestApiHardening(unittest.TestCase):
         self.assertIn("POST", headers.get("Access-Control-Allow-Methods", ""))
 
     def test_oversized_body_rejected(self):
+        # The server rejects on Content-Length without draining the body and then
+        # closes, so a large upload can also surface as a connection reset. Either
+        # way the request must not be accepted.
         port = self._serve()
-        status, _, body = self._request(port, "/v1/run", method="POST", payload={"task": "x" * 1_100_000})
+        try:
+            status, _, body = self._request(
+                port, "/v1/run", method="POST", payload={"task": "x" * 1_100_000}
+            )
+        except (BrokenPipeError, ConnectionResetError, urllib.error.URLError):
+            return
         self.assertEqual(status, 400)
         self.assertIn("exceeds", body)
 

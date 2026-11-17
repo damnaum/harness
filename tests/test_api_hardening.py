@@ -7,6 +7,7 @@ saturation — only exist at the HTTP layer.
 
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 import unittest
@@ -31,13 +32,20 @@ def _request(port: int, path: str, *, method: str = "GET", body: bytes | None = 
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, json.loads(resp.read().decode()), dict(resp.headers)
-    except urllib.error.HTTPError as exc:
+    except urllib.error.HTTPError as exc:  # must precede URLError: it subclasses it
         payload = exc.read().decode()
         try:
             parsed = json.loads(payload)
         except json.JSONDecodeError:
             parsed = {"raw": payload}
         return exc.code, parsed, dict(exc.headers)
+    except (BrokenPipeError, ConnectionResetError, http.client.RemoteDisconnected):
+        # The server closed early (rejection before consuming the body).
+        return 0, {"error": "connection closed by server"}, {}
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (BrokenPipeError, ConnectionResetError, http.client.RemoteDisconnected)):
+            return 0, {"error": "connection closed by server"}, {}
+        raise
 
 
 class _ServerFixture(unittest.TestCase):
@@ -104,12 +112,17 @@ class TestBodyLimits(_ServerFixture):
         self._stop()
 
     def test_oversized_body_rejected(self):
+        # The server answers before reading the body and closes the connection, so
+        # the client may see the 400 or a reset while it is still uploading (status
+        # 0 in _request). Both are rejections; what must never happen is the body
+        # being accepted.
         status, payload, _ = _request(
             self.port, "/v1/run", method="POST",
             body=b"{" + b"x" * (MAX_BODY_BYTES + 10) + b"}",
         )
-        self.assertEqual(status, 400)
-        self.assertIn("exceeds", payload["error"])
+        self.assertIn(status, (0, 400))
+        if status == 400:
+            self.assertIn("exceeds", payload["error"])
 
     def test_invalid_json(self):
         status, payload, _ = _request(self.port, "/v1/run", method="POST", body=b"not json")
@@ -244,6 +257,68 @@ class TestConcurrencyLimit(_ServerFixture):
             release.set()
             inner.run = original
             worker.join(timeout=10)
+
+
+class TestReadJsonBody(unittest.TestCase):
+    """Deterministic unit tests for the body parser (no sockets)."""
+
+    class _Headers(dict):
+        def get(self, key, default=None):  # match email.message.Message API
+            return dict.get(self, key, default)
+
+    def _parse(self, raw: bytes, headers: dict | None = None, max_bytes: int = 100):
+        import io
+
+        from apex.server.api import read_json_body
+
+        head = self._Headers(headers if headers is not None else {"Content-Length": str(len(raw))})
+        return read_json_body(head, io.BytesIO(raw), max_bytes=max_bytes)
+
+    def test_valid_object(self):
+        payload, error = self._parse(b'{"task": "hi"}')
+        self.assertIsNone(error)
+        self.assertEqual(payload, {"task": "hi"})
+
+    def test_oversize_rejected_before_reading(self):
+        import io
+
+        from apex.server.api import read_json_body
+
+        class ExplodingStream(io.BytesIO):
+            def read(self, *args, **kwargs):
+                raise AssertionError("oversized body must not be read")
+
+        payload, error = read_json_body(
+            self._Headers({"Content-Length": "5000"}), ExplodingStream(b""), max_bytes=100
+        )
+        self.assertIsNone(payload)
+        self.assertIn("exceeds", error)
+
+    def test_non_numeric_content_length(self):
+        _, error = self._parse(b"{}", headers={"Content-Length": "abc"})
+        self.assertIn("Content-Length", error)
+
+    def test_negative_content_length(self):
+        _, error = self._parse(b"{}", headers={"Content-Length": "-5"})
+        self.assertIn("Content-Length", error)
+
+    def test_truncated_body(self):
+        _, error = self._parse(b"{}", headers={"Content-Length": "50"})
+        self.assertIn("truncated", error)
+
+    def test_empty_body_is_empty_object(self):
+        payload, error = self._parse(b"", headers={})
+        self.assertIsNone(error)
+        self.assertEqual(payload, {})
+
+    def test_invalid_utf8(self):
+        raw = b"\xff\xfe"
+        _, error = self._parse(raw)
+        self.assertIn("not valid JSON", error)
+
+    def test_json_array_rejected(self):
+        _, error = self._parse(b"[1, 2]")
+        self.assertIn("JSON object", error)
 
 
 class TestServerClass(unittest.TestCase):

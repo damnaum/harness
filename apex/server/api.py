@@ -51,6 +51,38 @@ def _error(message: str, code: str = "bad_request") -> dict[str, Any]:
     return {"error": message, "code": code}
 
 
+def read_json_body(
+    headers: Any, stream: Any, max_bytes: int = MAX_BODY_BYTES
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse a JSON object body with an explicit size cap.
+
+    Returns ``(payload, error)``. Oversized bodies are rejected *without* being
+    read: the client is told to go away rather than allowed to make the server
+    allocate arbitrary memory.
+    """
+    length_raw = headers.get("Content-Length") or "0"
+    try:
+        length = int(length_raw)
+    except (TypeError, ValueError):
+        return None, "invalid Content-Length"
+    if length < 0:
+        return None, "invalid Content-Length"
+    if length > max_bytes:
+        return None, f"body exceeds {max_bytes} bytes"
+    if length == 0:
+        return {}, None
+    raw = stream.read(length)
+    if len(raw) < length:
+        return None, "truncated body"
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, "body is not valid JSON"
+    if not isinstance(parsed, dict):
+        return None, "body must be a JSON object"
+    return parsed, None
+
+
 def group_spans_by_trace(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group flat spans into per-trace records (API consumers think in traces)."""
     traces: dict[str, dict[str, Any]] = {}
@@ -124,23 +156,11 @@ def make_handler(
             return hmac.compare_digest(supplied.encode(), token.encode())
 
         def _read_json(self) -> tuple[dict[str, Any] | None, str | None]:
-            length_raw = self.headers.get("Content-Length") or "0"
-            try:
-                length = int(length_raw)
-            except ValueError:
-                return None, "invalid Content-Length"
-            if length > MAX_BODY_BYTES:
-                return None, f"body exceeds {MAX_BODY_BYTES} bytes"
-            if length <= 0:
-                return {}, None
-            raw = self.rfile.read(length)
-            try:
-                parsed = json.loads(raw.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                return None, "body is not valid JSON"
-            if not isinstance(parsed, dict):
-                return None, "body must be a JSON object"
-            return parsed, None
+            payload, problem = read_json_body(self.headers, self.rfile)
+            if problem is not None:
+                # We may not have consumed the body; do not reuse the socket.
+                self.close_connection = True
+            return payload, problem
 
         # -- verbs ----------------------------------------------------------
         def do_OPTIONS(self):  # noqa: N802 - stdlib naming
@@ -185,7 +205,7 @@ def make_handler(
                 return
             data, problem = self._read_json()
             if problem is not None:
-                self._send(400, _error(problem))
+                self._send(400, _error(problem), headers={"Connection": "close"})
                 return
             path = self.path.split("?", 1)[0]
             try:

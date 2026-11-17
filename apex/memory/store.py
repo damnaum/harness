@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -92,9 +93,17 @@ class MemoryStore:
         self.semantic_limit = semantic_limit
         self._episode_index = TfidfIndex()
         self._fact_index = TfidfIndex()
+        # The HTTP server is threaded, so two runs can remember and recall at the
+        # same time. Without this lock an eviction rebuild can re-point the index
+        # underneath a concurrent search, returning the wrong episode.
+        self._lock = threading.RLock()
 
     # -- episodic -----------------------------------------------------------
     def remember_episode(self, episode: Episode) -> None:
+        with self._lock:
+            self._remember_episode_locked(episode)
+
+    def _remember_episode_locked(self, episode: Episode) -> None:
         self.episodic.append(episode)
         self._episode_index.add(f"{episode.task} {episode.output}")
         if len(self.episodic) > self.episodic_limit:
@@ -108,12 +117,14 @@ class MemoryStore:
         import difflib
 
         normalised_query = " ".join(query.split()).lower()
-        hits = self._episode_index.search(query, top_k + 3)
+        with self._lock:
+            hits = self._episode_index.search(query, top_k + 3)
+            snapshot = list(self.episodic)  # copy: another thread may evict mid-loop
         out: list[Episode] = []
         for i, score in hits:
-            if i >= len(self.episodic) or score < min_score:
+            if i >= len(snapshot) or score < min_score:
                 continue
-            ep = self.episodic[i]
+            ep = snapshot[i]
             same = difflib.SequenceMatcher(
                 None, normalised_query, " ".join(ep.task.split()).lower()
             ).ratio()
@@ -128,30 +139,38 @@ class MemoryStore:
     def remember_fact(self, text: str, source: str = "user") -> None:
         # Facts are idempotent: re-remembering the same text must not duplicate.
         normalised = " ".join(text.split()).lower()
-        if any(" ".join(f.text.split()).lower() == normalised for f in self.facts):
-            return
-        self.facts.append(Fact(text=text, source=source))
-        self._fact_index.add(text)
-        if len(self.facts) > self.semantic_limit:
-            self.facts = self.facts[-self.semantic_limit :]
-            self._fact_index.rebuild([f.text for f in self.facts])
+        with self._lock:
+            if any(" ".join(f.text.split()).lower() == normalised for f in self.facts):
+                return
+            self.facts.append(Fact(text=text, source=source))
+            self._fact_index.add(text)
+            if len(self.facts) > self.semantic_limit:
+                self.facts = self.facts[-self.semantic_limit :]
+                self._fact_index.rebuild([f.text for f in self.facts])
 
     def recall_facts(self, query: str, top_k: int = 5, min_score: float = 0.08) -> list[Fact]:
-        hits = self._fact_index.search(query, top_k)
-        return [self.facts[i] for i, score in hits if i < len(self.facts) and score >= min_score]
+        with self._lock:
+            hits = self._fact_index.search(query, top_k)
+            return [self.facts[i] for i, score in hits if i < len(self.facts) and score >= min_score]
 
     # -- procedural ------------------------------------------------------------
     def remember_procedure(self, task_type: str, strategy: str, model: str, score: float) -> None:
-        key = task_type
-        prev = self.procedural.get(key)
-        if prev is None or score > prev.get("score", 0):
-            self.procedural[key] = {"strategy": strategy, "model": model, "score": score}
+        with self._lock:
+            prev = self.procedural.get(task_type)
+            if prev is None or score > prev.get("score", 0):
+                self.procedural[task_type] = {"strategy": strategy, "model": model, "score": score}
 
     def best_procedure(self, task_type: str) -> dict[str, Any] | None:
-        return self.procedural.get(task_type)
+        with self._lock:
+            found = self.procedural.get(task_type)
+            return dict(found) if found else None
 
     # -- persistence ----------------------------------------------------------
     def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> dict[str, Any]:
         return {
             "version": 1,
             "episodic": [
@@ -164,6 +183,10 @@ class MemoryStore:
         }
 
     def restore(self, data: dict[str, Any]) -> None:
+        with self._lock:
+            self._restore_locked(data)
+
+    def _restore_locked(self, data: dict[str, Any]) -> None:
         self.episodic, self.facts, self.procedural = [], [], {}
         self._episode_index = TfidfIndex()
         self._fact_index = TfidfIndex()
@@ -236,8 +259,9 @@ class MemoryStore:
             return False
 
     def stats(self) -> dict[str, int]:
-        return {
-            "episodes": len(self.episodic),
-            "facts": len(self.facts),
-            "procedures": len(self.procedural),
-        }
+        with self._lock:
+            return {
+                "episodes": len(self.episodic),
+                "facts": len(self.facts),
+                "procedures": len(self.procedural),
+            }

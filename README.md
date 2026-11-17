@@ -46,7 +46,7 @@ budgeting) built in rather than bolted on.
 
 ```bash
 pip install -e .          # or: pip install -e ".[dev]" for pytest/ruff
-python -m unittest discover -s tests    # 385 tests, no network, no keys
+python -m unittest discover -s tests    # 398 tests, no network, no keys
 ```
 
 Python 3.10+. Zero hard dependencies.
@@ -191,12 +191,12 @@ Offline it scores **100% pass, ~0.89 mean** — a regression baseline for the ha
 ## Testing
 
 ```bash
-python -m unittest discover -s tests -v     # 385 tests
+python -m unittest discover -s tests -v     # 398 tests
 python -m pytest tests -q                   # if pytest is installed
 ruff check apex tests
 ```
 
-385 tests across 18 files: models/routing/classification · registry integrity ·
+398 tests across 19 files: models/routing/classification · registry integrity ·
 tools + sandbox security · reasoning + memory · execution (retry/breaker/checkpoint) ·
 harness end-to-end + guardrails · offline provider behaviour · real-provider
 request/response contracts · memory persistence and eviction integrity ·
