@@ -305,6 +305,11 @@ class TestCliRoutingOutput(unittest.TestCase):
         self.assertNotIn("mock/apex-mock", output)
         self.assertIn("preview of frontier routing", output)
 
+    def test_empty_task_is_a_usage_error(self):
+        code, output = self._run("--profile", "offline", "run", "")
+        self.assertEqual(code, 2)
+        self.assertIn("non-empty", output + "")
+
     def test_run_json_reports_success(self):
         import json as jsonlib
 

@@ -188,6 +188,17 @@ class ApexHarness:
 
             # 3. route model (explicit arg > configured default > auto-route)
             preferred = model or (self.config.models.default_model or None)
+            if preferred:
+                from .models.registry import get_model
+
+                if get_model(preferred) is None:
+                    # Silently serving a different model than the caller asked for
+                    # is worse than a visible warning: cost and quality assumptions
+                    # both change.
+                    warnings.append(
+                        f"unknown model '{preferred}' — fell back to routing; "
+                        f"use `apex models` for valid ids"
+                    )
             decision = self.router.route(task, preferred=preferred)
             if self.degraded:
                 warnings.append(

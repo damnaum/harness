@@ -12,10 +12,23 @@ license = { text = "MIT" }
 authors = [{ name = "APEX" }]
 keywords = ["agents", "llm", "harness", "orchestration", "reasoning", "multi-agent"]
 classifiers = [
-    "Programming Language :: Python :: 3",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
+
+[project.urls]
+Documentation = "https://github.com/damnaum/harness/blob/main/docs/ARCHITECTURE.md"
+Source = "https://github.com/damnaum/harness"
+Changelog = "https://github.com/damnaum/harness/commits/main"
 # Zero hard dependencies: core runs on the Python standard library alone.
 # Provider SDKs are optional and accessed via stdlib HTTP.
 dependencies = []

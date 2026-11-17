@@ -207,5 +207,24 @@ class TestToolOutputScanInLoop(unittest.TestCase):
         self.assertIn("UNTRUSTED DATA", observations[0])
 
 
+class TestExplicitModelSelection(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.harness = ApexHarness(ApexConfig(profile="offline", workspace=self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_unknown_model_warns_instead_of_silently_substituting(self):
+        result = self.harness.run("What is 2 + 2?", model="nope/not-a-model")
+        self.assertTrue(any("unknown model" in w for w in result.warnings))
+        self.assertNotEqual(result.model_used, "nope/not-a-model")
+
+    def test_known_model_is_used(self):
+        result = self.harness.run("What is 2 + 2?", model="mock/apex-mock")
+        self.assertEqual(result.model_used, "mock/apex-mock")
+        self.assertFalse(any("unknown model" in w for w in result.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()

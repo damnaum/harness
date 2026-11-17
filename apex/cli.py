@@ -71,6 +71,9 @@ def _harness(args):
 # commands
 # --------------------------------------------------------------------------
 def cmd_run(args) -> int:
+    if not args.task or not args.task.strip():
+        print("error: task must be a non-empty string", file=sys.stderr)
+        return 2
     h = _harness(args)
     result = h.run(args.task, model=args.model, strategy=args.strategy)
     if args.json:
