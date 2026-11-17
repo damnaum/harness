@@ -136,3 +136,40 @@ The public surface is `apex.harness.ApexHarness`, `apex.sdk.Apex`,
 minor versions. Pin a version in production, run `apex eval` against the new
 version, and compare pass rate and mean score before rolling out — the eval
 suite exists precisely so that upgrading is a measurement, not a leap of faith.
+
+## Container deployment
+
+A production `Dockerfile` ships in the repository root. It is deliberately
+small — the harness has no runtime dependencies — and runs as an unprivileged
+user:
+
+```bash
+docker build -t apex:1.0.0 .
+docker run --rm -p 8000:8000 \
+  -e APEX_API_TOKEN="$(openssl rand -hex 24)" \
+  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  -e APEX_MAX_CONCURRENCY=4 \
+  -e APEX_MAX_COST_USD=2.00 \
+  -v apex-state:/workspace \
+  apex:1.0.0
+```
+
+What the image does for you:
+
+| Concern | Setting |
+|---|---|
+| Non-root | uid/gid 10001, no shell |
+| Shutdown | `SIGTERM` handled, in-flight request completes |
+| Health | `HEALTHCHECK` hits `/health` (no curl needed) |
+| State | `/workspace` volume holds memory + checkpoints |
+| Safety | `APEX_PROFILE=prod` — guardrails on, **tool auto-approval off** |
+
+The last row matters: with `prod`, `bash` and `write_file` are denied until an
+approval handler is installed. That is the correct default for a network-facing
+deployment. If you need them, mount a config with `safety.auto_approve_tools=true`
+and accept that tool calls are then unguarded — read `docs/SECURITY.md` first.
+
+Kubernetes: use the `/health` endpoint for liveness and `/ready` for readiness,
+set `terminationGracePeriodSeconds` to at least your longest request, and do not
+scale a replica above one writer per workspace volume (the memory file is
+last-write-wins).

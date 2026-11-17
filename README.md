@@ -228,6 +228,13 @@ evaluation scorers · API hardening · API + CLI integration.
 - Single-process by default. For multi-node execution you need an external queue; the
   checkpointer and JSON memory are local-disk designs.
 
+## Deployment
+
+A production `Dockerfile` is included: non-root (uid 10001), `prod` profile,
+`/health` healthcheck, `/workspace` volume for memory and checkpoints, graceful
+`SIGTERM`. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the container,
+Kubernetes and configuration guidance.
+
 ## License
 
 MIT.
