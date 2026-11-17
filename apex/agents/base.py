@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from ..errors import BudgetExceededError
 from ..execution.loop import ReActLoop
 from ..types import AgentResult, Message, ModelInfo, Role
 
@@ -85,6 +86,7 @@ class Agent:
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         context_manager: Any = None,
         guardrails: Any = None,
+        model_fn: Callable[[list[Message], Any], Any] | None = None,
     ):
         self.name = name
         self.system_prompt = system_prompt
@@ -97,6 +99,9 @@ class Agent:
         self.on_event = on_event or (lambda *a: None)
         self.context_manager = context_manager
         self.guardrails = guardrails
+        # Injected so a swarm agent uses the same retry/breaker/fallback/budget
+        # path as single-agent runs instead of calling the provider directly.
+        self._injected_model_fn = model_fn
 
     def tool_specs(self) -> list[dict[str, Any]] | None:
         if self.tool_registry is None:
@@ -106,6 +111,8 @@ class Agent:
         return [self.tool_registry.get(n).spec() for n in self.tools if n in self.tool_registry.tools]
 
     def _model_fn(self, messages: list[Message], tools) -> Any:
+        if self._injected_model_fn is not None:
+            return self._injected_model_fn(messages, tools)
         return self.provider.complete(self.model, messages, tools=tools, temperature=self.temperature)
 
     def run(self, task: str, context: AgentContext | None = None) -> AgentResult:
@@ -135,6 +142,10 @@ class Agent:
                 cost_usd=result["cost_usd"],
                 duration_ms=(time.time() - start) * 1000,
             )
+        except BudgetExceededError:
+            # Spend limits are fatal: continuing would spend money the operator
+            # explicitly capped. Propagate so the run stops and reports the spend.
+            raise
         except Exception as exc:  # noqa: BLE001 - agents report failure, swarm continues
             return AgentResult(
                 agent=self.name, output="", success=False,
@@ -145,7 +156,7 @@ class Agent:
 
 # ------------------------------------------------------------------ factory
 def make_agents(model, provider, tool_registry, max_steps=25, on_event=None,
-                context_manager=None, guardrails=None) -> dict[str, Agent]:
+                context_manager=None, guardrails=None, model_fn=None) -> dict[str, Agent]:
     """Build the full APEX swarm with role-tuned prompts and tool subsets."""
     from .prompts import AGENT_PROMPTS
 
@@ -168,5 +179,6 @@ def make_agents(model, provider, tool_registry, max_steps=25, on_event=None,
             guardrails=guardrails,
             tool_registry=tool_registry, tools=tool_map.get(name),
             max_steps=max_steps, on_event=on_event,
+            model_fn=model_fn,
         )
     return agents

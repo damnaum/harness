@@ -110,6 +110,44 @@ class TestBudgetEnforcement(BudgetTestBase):
         self.assertIn("budget_exceeded", seen)
 
 
+class TestSwarmBudget(BudgetTestBase):
+    """Swarm agents must share the single-agent path's fallback chain and cap."""
+
+    def _stub(self, cost: float, calls: dict):
+        def fake(decision, messages, tools=None, temperature=0.7):
+            calls["n"] += 1
+            return ModelResponse(
+                content="step done", model_id=decision.model.id,
+                tokens_in=20, tokens_out=10, cost_usd=cost,
+            ), decision.model
+
+        self.harness._complete_with_fallback = fake
+
+    def test_swarm_uses_fallback_aware_model_call(self):
+        calls = {"n": 0}
+        self._stub(0.001, calls)
+        result = self.harness.run(
+            "Research and compare vector databases, then write a recommendation",
+            strategy=ReasoningStrategy.PLAN_EXECUTE,
+        )
+        self.assertTrue(result.success)
+        self.assertGreater(calls["n"], 0, "swarm must call through the harness, not the provider")
+        self.assertGreater(result.total_cost_usd, 0)
+
+    def test_swarm_stops_at_budget(self):
+        calls = {"n": 0}
+        self.harness.config.models.max_cost_usd = 0.002
+        self._stub(0.001, calls)
+        result = self.harness.run(
+            "Research and compare vector databases, then write a recommendation",
+            strategy=ReasoningStrategy.PLAN_EXECUTE,
+        )
+        self.assertFalse(result.success)
+        self.assertLessEqual(calls["n"], 3, "must stop shortly after crossing the cap")
+        self.assertTrue(any("budget exceeded" in w for w in result.warnings))
+        self.assertGreater(result.total_cost_usd, 0)
+
+
 class TestBudgetConfig(unittest.TestCase):
     def test_env_var(self):
         import os

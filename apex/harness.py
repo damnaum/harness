@@ -24,7 +24,7 @@ from .agents.base import make_agents
 from .agents.swarm import Swarm, run_with_critic
 from .config import ApexConfig
 from .context.manager import ContextBudget, ContextManager
-from .errors import ApexError
+from .errors import ApexError, BudgetExceededError
 from .execution.loop import Checkpointer, CircuitBreaker, RetryPolicy
 from .memory.store import Episode, MemoryStore
 from .models.base import build_provider
@@ -246,6 +246,7 @@ class ApexHarness:
                         on_event=lambda t, p: self._emit(t, **p),
                         context_manager=self.context,
                         guardrails=self.guardrails,
+                        model_fn=self._swarm_model_fn(decision),
                     )
                     swarm = Swarm(agents, parallel=False)
                     output, agent_results, critic_score = run_with_critic(
@@ -352,7 +353,6 @@ class ApexHarness:
         * Reflexion revision loop bounded by the strategy's reflection budget;
         * correct assistant/tool message shapes so native tool calling works.
         """
-        from .errors import BudgetExceededError
         from .reasoning.strategies import best_of_n, extract_final, majority_vote
         from .types import Message
 
@@ -475,6 +475,37 @@ class ApexHarness:
         return output.strip(), tokens_in, tokens_out, cost, model_used
 
     # ------------------------------------------------------------------
+    def _swarm_model_fn(self, decision):
+        """Model call for swarm agents: fallback chain, breaker, retry, budget.
+
+        Agents used to call ``provider.complete`` directly, so a swarm lost the
+        fallback chain and the spend cap that the single-agent path had.
+        """
+        budget = float(getattr(self.config.models, "max_cost_usd", 0.0) or 0.0)
+        spent = {"usd": 0.0}
+
+        def call(messages, tools):
+            if budget > 0 and spent["usd"] >= budget:
+                self._emit("budget_exceeded", spent=round(spent["usd"], 6), budget=budget)
+                raise BudgetExceededError(
+                    f"cost budget exceeded: spent ${spent['usd']:.4f} of ${budget:.4f} "
+                    f"— raise models.max_cost_usd (APEX_MAX_COST_USD) or use a cheaper route"
+                )
+            resp, used = self._complete_with_fallback(
+                decision, messages, tools=tools, temperature=0.7
+            )
+            spent["usd"] += resp.cost_usd or 0.0
+            prior = getattr(self, "_last_usage", (0, 0, 0.0, ""))
+            self._last_usage = (
+                prior[0] + resp.tokens_in,
+                prior[1] + resp.tokens_out,
+                prior[2] + (resp.cost_usd or 0.0),
+                used.id,
+            )
+            return resp
+
+        return call
+
     SIDE_EFFECTING_TOOLS = frozenset({"bash", "write_file", "python_exec"})
 
     def _side_effecting_tools(self) -> set[str]:
