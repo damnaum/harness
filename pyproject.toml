@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apex-harness"
+version = "1.0.0"
+description = "APEX — Advanced Peak-level Execution eXperience: production-grade agentic harness with multi-model routing, multi-agent swarm, reasoning strategies, memory, guardrails and observability."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "APEX" }]
+keywords = ["agents", "llm", "harness", "orchestration", "reasoning", "multi-agent"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+# Zero hard dependencies: core runs on the Python standard library alone.
+# Provider SDKs are optional and accessed via stdlib HTTP.
+dependencies = []
+
+[project.urls]
+Documentation = "https://github.com/damnaum/harness/blob/main/docs/ARCHITECTURE.md"
+Source = "https://github.com/damnaum/harness"
+Changelog = "https://github.com/damnaum/harness/commits/main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+all = []
+
+[project.scripts]
+apex = "apex.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["apex*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
