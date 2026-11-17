@@ -15,6 +15,8 @@ Pipeline for every task:
 from __future__ import annotations
 
 import os
+import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -67,18 +69,33 @@ class ApexHarness:
         config: ApexConfig | None = None,
         api_keys: dict[str, str] | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        strict: bool = True,
     ):
         self.config = config or ApexConfig()
         # The workspace is a sandbox root: create it rather than refusing to
         # start on a fresh checkout.
-        Path(self.config.workspace).mkdir(parents=True, exist_ok=True)
+        workspace_error = ""
+        try:
+            Path(self.config.workspace).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            workspace_error = f"workspace cannot be created: {exc}"
         problems = self.config.validate()
-        if problems:
+        if workspace_error:
+            problems = [p for p in problems if "workspace" not in p] + [workspace_error]
+        self.config_problems = problems
+        # strict=True is the production default: refuse to run with a config that
+        # would silently behave differently from what the operator wrote.
+        # Doctor/diagnostics pass strict=False so a broken config can still be
+        # inspected (a diagnostic tool that refuses to run on problems is useless).
+        if problems and strict:
             raise ValueError(f"invalid config: {problems}")
         self.api_keys = api_keys if api_keys is not None else _api_keys_from_env()
         self.logger = Logger(self.config.observability.log_level)
         self.metrics = Metrics()
-        self.tracer = Tracer(self.config.observability.trace_enabled)
+        self.tracer = Tracer(
+            self.config.observability.trace_enabled,
+            max_spans=getattr(self.config.observability, "max_spans", 5_000),
+        )
         self.events = EventBus()
         self._user_on_event = on_event
         self.events.subscribe("*", lambda e: self._user_on_event(e.type, e.payload) if self._user_on_event else None)
@@ -157,15 +174,30 @@ class ApexHarness:
         trace_id = self.tracer.new_trace()
         task_id = f"task_{uuid.uuid4().hex[:8]}"
         warnings: list[str] = []
-        # Per-run warning buffer (deduplicated inside _warn_once).
-        self._warn_seen = set()
-        self._warn_buffer = []
-        # Usage so far, so a failed run still reports what it spent. Billing and
-        # alerting that only count successful runs under-report exactly the runs
-        # you care about.
-        self._last_usage: tuple[int, int, float, str] = (0, 0, 0.0, "")
+        # Per-run state is *thread-local*: the HTTP server runs up to
+        # APEX_MAX_CONCURRENCY tasks on one harness instance, and instance
+        # attributes here would let one request's warnings and spend show up in
+        # another's result.
+        # Reset (not recreate) per run: rebinding the threading.local() object
+        # here would hand every thread a different object, so another thread's
+        # write could be invisible to the result being assembled.
+        if not hasattr(self, "_run_state"):
+            self._run_state = threading.local()
+        self._run_state.warn_seen = set()
+        self._run_state.warn_buffer = []
+        # Usage so far, so a failed run still reports what it spent.
+        self._run_state.last_usage = (0, 0, 0.0, "")
 
         with self.tracer.span("harness.run", task=task_description[:120]):
+            # 0. an empty task is a caller bug, not something to spend money on
+            if not isinstance(task_description, str) or not task_description.strip():
+                return HarnessResult(
+                    task_id=task_id, output="", success=False, model_used="",
+                    strategy=ReasoningStrategy.DIRECT, trace_id=trace_id,
+                    warnings=["empty task: nothing to do"],
+                    duration_ms=(time.time() - start) * 1000,
+                )
+
             # 1. safety on input
             if self.config.safety.enabled:
                 verdict = self.guardrails.check_input(task_description)
@@ -217,9 +249,7 @@ class ApexHarness:
             self.logger.info("routed", model=decision.model.id, task_type=task.task_type.value)
 
             # 4. strategy
-            needs_tools = task.task_type.value in ("code", "debugging", "research", "data") or any(
-                k in task_description.lower() for k in ("file", "run", "execute", "search", "calculate")
-            )
+            needs_tools = self._needs_tools(task, task_description)
             if strategy is not None:
                 chosen_strategy, strategy_reason = strategy, "explicitly requested by caller"
             else:
@@ -343,6 +373,33 @@ class ApexHarness:
             )
 
     # ------------------------------------------------------------------
+    # Deliberately nouns and unambiguous verbs. Words like "write", "open" and
+    # "list" appear constantly in prose ("write a haiku"), and a false positive
+    # here only picks a heavier strategy — but the reverse mistake (missing a real
+    # tool task) is what made the model answer blind, so filenames are matched by
+    # regex below and the nouns carry the rest.
+    _TOOL_HINTS = (
+        "file", "files", "filename", "folder", "directory", "subdirectory",
+        "run", "execute", "shell", "command", "script", "bash", "python", "pytest",
+        "search", "find", "grep", "look up", "fetch", "download", "http", "url", "web",
+        "git", "repo", "commit", "branch", "calculate", "compute", "count", "convert",
+        "csv", "json", "yaml", "dataset", "port", "install", "environment variable",
+    )
+
+    def _needs_tools(self, task, description: str) -> bool:
+        """Would answering this well plausibly require a tool?
+
+        Two signals, either is enough: a task type that is inherently tool-shaped,
+        or a hint word / filename in the text. This only decides strategy (react vs
+        direct); tool *schemas* are offered independently (see agents.always_offer_tools).
+        """
+        if task.task_type.value in ("code", "debugging", "research", "data"):
+            return True
+        low = description.lower()
+        if any(hint in low for hint in self._TOOL_HINTS):
+            return True
+        return bool(re.search(r"\b[\w-]+\.(txt|md|py|json|ya?ml|csv|log|toml|ini|cfg|html?)\b", low))
+
     def _run_single_agent(self, decision, spec, task_description, memory_hits, needs_tools):
         """Execute one agent through the selected reasoning strategy.
 
@@ -368,7 +425,10 @@ class ApexHarness:
             Message(role=Role.SYSTEM, content=system),
             Message(role=Role.USER, content=user),
         ])
-        tools = self.tools.specs() if needs_tools else None
+        offer = bool(self.tools.names()) and (
+            needs_tools or getattr(self.config.agents, "always_offer_tools", True)
+        )
+        tools = self.tools.specs() if offer else None
 
         tokens_in = tokens_out = 0
         cost = 0.0
@@ -397,6 +457,19 @@ class ApexHarness:
             messages = list(base_messages)
             seen: dict[str, int] = {}
             for _ in range(self.config.agents.max_steps):
+                # Compact between rounds: tool observations accumulate, and an
+                # uncompacted loop eventually exceeds the window (a hard provider
+                # failure after the money is already spent).
+                messages = self.context.fit_messages(messages)
+                if not any(m.role == Role.USER and task_description in m.content for m in messages):
+                    # Eviction removed the original instruction: restate it so the
+                    # loop cannot wander off after the first compaction.
+                    system_msgs = [m for m in messages if m.role == Role.SYSTEM]
+                    rest = [m for m in messages if m.role != Role.SYSTEM]
+                    messages = system_msgs + [Message(
+                        role=Role.USER,
+                        content="[Task reminder — earlier turns were compacted]\n" + task_description,
+                    )] + rest
                 resp = call(messages, spec.temperature)
                 if not resp.tool_calls:
                     return resp.content or ""
@@ -412,6 +485,19 @@ class ApexHarness:
                     if seen[fingerprint] > 2:
                         return resp.content or "stopped: repeated identical tool call"
                     result = self.tools.execute(call_req)
+                    if not result.success and "requires approval" in (result.error or ""):
+                        # A denied privileged tool is a policy event an operator must
+                        # see: the run continues and looks healthy otherwise.
+                        self._emit("tool_denied", tool=call_req.name)
+                        self._warn_once(
+                            f"denied:{call_req.name}",
+                            f"tool '{call_req.name}' denied by policy (auto_approve_tools="
+                            f"{self.config.safety.auto_approve_tools}, no approval handler); "
+                            "the answer reflects that it could not run",
+                        )
+                    elif not result.success:
+                        self._emit("tool_failed", tool=call_req.name,
+                                   error=(result.error or "")[:200])
                     observation = result.output if result.success else f"ERROR: {result.error}"
                     if isinstance(observation, str):
                         verdict = self.guardrails.check_tool_output(observation, call_req.name)
@@ -475,6 +561,30 @@ class ApexHarness:
         return output.strip(), tokens_in, tokens_out, cost, model_used
 
     # ------------------------------------------------------------------
+    @property
+    def _warn_seen(self) -> set[str]:
+        return getattr(self._run_state, "warn_seen", set())
+
+    @_warn_seen.setter
+    def _warn_seen(self, value: set[str]) -> None:
+        self._run_state.warn_seen = value
+
+    @property
+    def _warn_buffer(self) -> list[str]:
+        return getattr(self._run_state, "warn_buffer", [])
+
+    @_warn_buffer.setter
+    def _warn_buffer(self, value: list[str]) -> None:
+        self._run_state.warn_buffer = value
+
+    @property
+    def _last_usage(self) -> tuple[int, int, float, str]:
+        return getattr(self._run_state, "last_usage", (0, 0, 0.0, ""))
+
+    @_last_usage.setter
+    def _last_usage(self, value: tuple[int, int, float, str]) -> None:
+        self._run_state.last_usage = value
+
     def _swarm_model_fn(self, decision):
         """Model call for swarm agents: fallback chain, breaker, retry, budget.
 

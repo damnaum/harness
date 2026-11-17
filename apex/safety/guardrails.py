@@ -31,7 +31,15 @@ _INJECTION_PATTERNS = [
 ]
 
 _PII_PATTERNS = [
-    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[EMAIL]"),
+    # Bounded quantifiers on purpose: the obvious `[A-Za-z0-9._%+-]+@...` form is
+    # quadratic — 50 KB of plain letters took 3 seconds, so a 1 MB prompt would
+    # tie a worker up for many minutes. This form stays linear.
+    (re.compile(
+        r"(?<![\w.+-])[A-Za-z0-9._%+-]{1,64}@"
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?){0,3}"
+        r"\.[A-Za-z]{2,24}(?![\w-])"
+    ), "[EMAIL]"),
     (re.compile(r"\b(?:sk-[A-Za-z0-9]{20,}|sk-ant-[A-Za-z0-9\-_]{20,}|ghp_[A-Za-z0-9]{20,}"
                 r"|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9\-]{10,})\b"), "[API_KEY]"),
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN]"),

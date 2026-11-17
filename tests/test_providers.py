@@ -193,5 +193,150 @@ class TestResponses(unittest.TestCase):
         self.assertTrue(resp.content)
 
 
+class TestWireFormatContracts(unittest.TestCase):
+    """The three wire formats have non-obvious multi-turn requirements.
+
+    Getting these wrong produces a 400 in the middle of a ReAct loop, which is
+    the worst possible time to discover a serialisation bug.
+    """
+
+    def _two_tool_turn(self):
+        from apex.types import Message, Role
+
+        return [
+            Message(role=Role.SYSTEM, content="sys"),
+            Message(role=Role.USER, content="do two things"),
+            Message(role=Role.ASSISTANT, content="", metadata={"tool_calls": [
+                {"id": "c1", "name": "read_file", "arguments": {"path": "a"}},
+                {"id": "c2", "name": "read_file", "arguments": {"path": "b"}},
+            ]}),
+            Message(role=Role.TOOL, content="A", name="read_file", tool_call_id="c1"),
+            Message(role=Role.TOOL, content="B", name="read_file", tool_call_id="c2"),
+        ]
+
+    def _capture(self, provider, model_id, messages):
+        captured = {}
+
+        def fake(url, payload, headers):
+            captured["payload"] = payload
+            captured["url"] = url
+            return {
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "content": [{"type": "text", "text": "ok"}],
+                "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+                "usage": {},
+            }
+
+        provider._post_json = fake
+        from apex.models.registry import get_model
+
+        provider.complete(get_model(model_id), messages)
+        return captured["payload"]
+
+    def test_openai_tool_messages_carry_ids(self):
+        from apex.models.base import OpenAICompatibleProvider
+
+        payload = self._capture(OpenAICompatibleProvider(api_key="k"), "openai/gpt-5.2", self._two_tool_turn())
+        roles = [m["role"] for m in payload["messages"]]
+        self.assertEqual(roles, ["system", "user", "assistant", "tool", "tool"])
+        self.assertEqual(payload["messages"][3]["tool_call_id"], "c1")
+        self.assertEqual(payload["messages"][4]["tool_call_id"], "c2")
+        self.assertEqual(payload["messages"][2]["tool_calls"][0]["type"], "function")
+
+    def test_anthropic_merges_parallel_tool_results(self):
+        from apex.models.base import AnthropicProvider
+
+        payload = self._capture(AnthropicProvider(api_key="k"), "anthropic/claude-opus-4.5", self._two_tool_turn())
+        self.assertEqual(payload["system"], "sys")
+        self.assertNotIn("system", [m["role"] for m in payload["messages"]])
+        tool_turns = [
+            m for m in payload["messages"]
+            if m["role"] == "user" and isinstance(m["content"], list)
+            and m["content"] and m["content"][0].get("type") == "tool_result"
+        ]
+        self.assertEqual(len(tool_turns), 1, "both tool_result blocks belong to one user turn")
+        self.assertEqual(len(tool_turns[0]["content"]), 2)
+        self.assertEqual(tool_turns[0]["content"][0]["tool_use_id"], "c1")
+        self.assertEqual(tool_turns[0]["content"][1]["tool_use_id"], "c2")
+        assistants = [m for m in payload["messages"] if m["role"] == "assistant"]
+        self.assertEqual(len(assistants[0]["content"]), 2)
+
+    def test_anthropic_merges_consecutive_plain_turns(self):
+        from apex.models.base import AnthropicProvider
+        from apex.types import Message, Role
+
+        payload = self._capture(
+            AnthropicProvider(api_key="k"), "anthropic/claude-opus-4.5",
+            [Message(role=Role.USER, content="one"), Message(role=Role.USER, content="two")],
+        )
+        self.assertEqual(len(payload["messages"]), 1)
+        self.assertIn("two", payload["messages"][0]["content"])
+
+    def test_anthropic_max_tokens_follows_the_model(self):
+        from apex.models.base import AnthropicProvider
+
+        payload = self._capture(AnthropicProvider(api_key="k"), "anthropic/claude-opus-4.5", self._two_tool_turn())
+        self.assertGreater(payload["max_tokens"], 4096)
+
+    def test_google_merges_function_responses_into_one_turn(self):
+        from apex.models.base import GoogleProvider
+
+        payload = self._capture(GoogleProvider(api_key="k"), "google/gemini-3-pro", self._two_tool_turn())
+        contents = payload["contents"]
+        self.assertEqual([c["role"] for c in contents], ["user", "model", "user"])
+        responses = [p for p in contents[2]["parts"] if "functionResponse" in p]
+        self.assertEqual(len(responses), 2)
+        self.assertIn("systemInstruction", payload)
+        self.assertIn("maxOutputTokens", payload["generationConfig"])
+
+    def test_google_system_prompt_is_not_a_turn(self):
+        from apex.models.base import GoogleProvider
+
+        payload = self._capture(GoogleProvider(api_key="k"), "google/gemini-3-pro", self._two_tool_turn())
+        for entry in payload["contents"]:
+            for part in entry["parts"]:
+                self.assertNotEqual(part.get("text"), "sys")
+
+    def test_openai_retries_with_max_completion_tokens(self):
+        from apex.models.base import OpenAICompatibleProvider
+        from apex.models.registry import get_model
+
+        provider = OpenAICompatibleProvider(api_key="k")
+        seen = []
+
+        def fake(url, payload, headers):
+            seen.append(dict(payload))
+            if "max_tokens" in payload:
+                from apex.errors import ModelError
+
+                raise ModelError("400: Unsupported parameter: 'max_tokens' ... use 'max_completion_tokens'")
+            return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+        provider._post_json = fake
+        provider.complete(get_model("openai/o3"), [__import__("apex.types", fromlist=["Message"]).Message(
+            role=__import__("apex.types", fromlist=["Role"]).Role.USER, content="hi")], max_tokens=64)
+        self.assertEqual(len(seen), 2)
+        self.assertIn("max_tokens", seen[0])
+        self.assertIn("max_completion_tokens", seen[1])
+
+    def test_unrelated_model_error_is_not_retried(self):
+        from apex.errors import ModelError
+        from apex.models.base import OpenAICompatibleProvider
+        from apex.models.registry import get_model
+        from apex.types import Message, Role
+
+        provider = OpenAICompatibleProvider(api_key="k")
+        calls = {"n": 0}
+
+        def fake(*args, **kwargs):
+            calls["n"] += 1
+            raise ModelError("400: context length exceeded")
+
+        provider._post_json = fake
+        with self.assertRaises(ModelError):
+            provider.complete(get_model("openai/gpt-5.2"), [Message(role=Role.USER, content="hi")])
+        self.assertEqual(calls["n"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

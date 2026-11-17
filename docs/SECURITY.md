@@ -57,7 +57,10 @@ Be explicit with your users about these:
   when approved. The deny-list is a speed bump against accidents and lazy
   attacks, not a jail. If the model can run shell commands, treat the process
   as having the OS user's privileges. Use a container, a dedicated user, or
-  turn these tools off (`require_approval_for` plus no approval handler).
+  turn these tools off (`require_approval_for` plus no approval handler). A
+  denial is never silent: it produces a `tool_denied` event and metric, and a
+  run warning naming the tool, because a run that only *looked* successful is
+  worse than a loud failure.
 - **No OS-level sandbox.** There is no seccomp/namespace/VM isolation. Files
   are confined logically, not by the kernel; a determined piece of code inside
   `python_exec` can still read anything the user can read.

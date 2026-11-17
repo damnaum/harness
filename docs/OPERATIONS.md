@@ -29,10 +29,15 @@ threads.
 | `OLLAMA_HOST` | Local Ollama endpoint | `http://localhost:11434` |
 | `APEX_PROFILE` | `fast` \| `balanced` \| `quality` \| `offline` \| `prod` | `balanced` |
 | `APEX_CONFIG` | Path to a JSON config file | unset |
+| `APEX_WORKSPACE` | Sandbox root for tools, memory and checkpoints | `.` |
+| `APEX_CHECKPOINT_DIR` | Where per-run JSON checkpoints are written | `.apex/checkpoints` |
+| `APEX_SESSION_ID` | Label written into checkpoints/metrics | `default` |
 | `APEX_API_TOKEN` | If set, every HTTP route requires `Authorization: Bearer <token>` | unset |
 | `APEX_CORS_ORIGIN` | `Access-Control-Allow-Origin` value | `*` |
 | `APEX_MAX_CONCURRENCY` | Simultaneous `/v1/run` requests before `503` | `4` |
 | `APEX_MAX_COST_USD` | Hard per-run spend cap; `0` disables | `0` |
+| `APEX_MAX_SPANS` | Traces kept in memory (ring buffer) | `5000` |
+| `APEX_TOOLS_ALWAYS_OFFER` | Send tool schemas on every request (`false` saves ~550 input tokens per call) | `true` |
 | `APEX_LOG_LEVEL` | `DEBUG` \| `INFO` \| `WARN` \| `ERROR` | `INFO` |
 | `APEX_CONFIG` | Config file path (JSON or simple YAML) | unset |
 | `APEX_MODEL`, `APEX_ROUTER_MODE`, `APEX_MAX_STEPS`, `APEX_PLAN_STEPS` | Direct overrides | profile defaults |

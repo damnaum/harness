@@ -97,7 +97,9 @@ class ContextManager:
 
         total = sum(cost(m) for m in system + rest)
         if total <= usable:
-            return list(messages)
+            # Even when everything fits, an orphaned tool observation would make
+            # the request invalid; filtering here keeps the invariant unconditional.
+            return self.drop_orphan_tool_messages(list(messages))
 
         # 2. Summarise oversized tool observations first: they are the bulk and
         #    the conclusion matters more than the raw dump.
@@ -128,7 +130,35 @@ class ContextManager:
             kept = [Message(role=trimmed.role, content=trimmed.content[:head] + "…[truncated]",
                             name=trimmed.name, tool_call_id=trimmed.tool_call_id)]
 
-        return system + kept
+        return self.drop_orphan_tool_messages(system + kept)
+
+    @staticmethod
+    def drop_orphan_tool_messages(messages: list[Message]) -> list[Message]:
+        """Remove tool observations whose assistant tool_call was evicted.
+
+        Eviction happens at the oldest end, so it can cut between an assistant
+        turn that requested a tool and the observation that answered it. A lone
+        `role=tool` message is not a valid turn for any provider — OpenAI rejects
+        it ("must be a response to a preceding message with tool_calls") and
+        Anthropic rejects an unmatched `tool_result` — so the whole request would
+        fail with a 400 that looks like a malformed conversation, not an
+        over-budget one.
+        """
+        declared: set[str] = set()
+        kept: list[Message] = []
+        for message in messages:
+            if message.role == Role.ASSISTANT:
+                for call in (message.metadata or {}).get("tool_calls") or []:
+                    call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+                    if call_id:
+                        declared.add(str(call_id))
+                kept.append(message)
+            elif message.role == Role.TOOL:
+                if message.tool_call_id and str(message.tool_call_id) in declared:
+                    kept.append(message)
+            else:
+                kept.append(message)
+        return kept
 
     def clear(self) -> None:
         self.messages.clear()

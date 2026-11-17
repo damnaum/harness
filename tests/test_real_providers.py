@@ -170,7 +170,9 @@ class TestAnthropicProvider(StubTransportMixin, unittest.TestCase):
         payload = captured["payload"]
         self.assertEqual(payload["model"], "claude-sonnet-4.5")
         self.assertEqual(payload["system"], "You are APEX.")
-        self.assertEqual(payload["max_tokens"], 4096)
+        # Derived from the model's own output limit, not a hardcoded constant.
+        self.assertGreater(payload["max_tokens"], 4096)
+        self.assertLessEqual(payload["max_tokens"], 8192)
         self.assertEqual(captured["headers"]["x-api-key"], "ak-test")
         self.assertEqual(captured["headers"]["anthropic-version"], "2023-06-01")
         self.assertEqual(payload["tools"][0]["input_schema"]["required"], ["path"])

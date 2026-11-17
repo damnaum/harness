@@ -2,6 +2,38 @@
 
 All notable changes to APEX. Versioned with [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Correctness (found by running the harness, not by reading it)
+- **Tool tasks were answered blind.** Tool schemas were gated behind a keyword
+  heuristic that missed concrete filenames, and the offline provider demanded a
+  second keyword match, so "read notes.txt and tell me the release" produced a
+  confident answer that never opened the file. Schemas are now offered every
+  request (`agents.always_offer_tools`, `APEX_TOOLS_ALWAYS_OFFER`), the strategy
+  heuristic recognises filename tokens, and the answer is grounded in the file.
+- **The ReAct loop never compacted.** Prompts grew 881 → 20 881 → 40 881 chars
+  and kept climbing; `fit_messages` now runs before every model call, restates
+  the task after eviction and drops orphaned tool turns that providers reject.
+- **Scope was judged by word count.** A 22-word request with five deliverables
+  classified as SIMPLE and skipped the planner; complexity now has a floor based
+  on the number of distinct deliverables.
+- **Retry and the breaker treated every error as transient.** A 401 was retried
+  three times with backoff, and five malformed requests could open the shared
+  breaker. `errors.is_retryable` retries 429/5xx/timeouts only.
+- **Denied privileged tools were invisible.** `success=True` with no warning when
+  the approval gate refused `bash`; now `tool_denied` + a run warning, with
+  `tool_failed` counting ordinary tool errors separately.
+- **HTTP verbs answered with an HTML 501.** Wrong-verb requests now return 405
+  with `Allow` and a JSON body; `HEAD` mirrors the GET routes.
+- **Traces grew without bound** (a server-lifetime leak); the span list is now a
+  ring buffer (`APEX_MAX_SPANS`).
+- **The email redaction regex was quadratic** (3s on 50 KB of plain text); it is
+  bounded and linear now, with the same redaction behaviour.
+
+### Tests
+- 556 tests across 24 suites, including docs-consistency checks that bind the
+  README/CHANGELOG/API/SECURITY/OPERATIONS claims to the code.
+
 ## [1.0.0] — 2026-11-17
 
 First production release. Standard-library only; no runtime dependencies.
@@ -42,6 +74,6 @@ First production release. Standard-library only; no runtime dependencies.
   `/v1/traces`.
 - Hard per-run spend cap (`models.max_cost_usd`) that binds on both the
   single-agent and swarm paths.
-- 426 tests, offline and key-free; 11-task eval suite with three
+- 457 tests, offline and key-free; 11-task eval suite with three
   execution-verified coding tasks; `apex eval --min-pass-rate` as a CI gate.
 - Production `Dockerfile` (non-root, healthcheck, volume, `prod` profile).

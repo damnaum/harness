@@ -209,6 +209,33 @@ _STRONG_CODE_TOKENS = (
 _ARITHMETIC_RE = re.compile(r"\d+\s*[-+*/^%]\s*\d+")
 _MULTI_STEP_MARKERS = (" then ", " after that", " step 1", " step 2", " and then", " finally ")
 
+# Distinct deliverables, not word count, decide whether a task is multi-part.
+# "Design and implement a rate limiter, compare token bucket vs sliding window,
+# write code, run a benchmark, recommend one" is 22 words — word-count alone
+# called it simple, so it got no plan and no swarm. One verb per clause is the
+# honest measure of scope.
+_ACTION_VERBS = (
+    "design", "implement", "build", "create", "refactor", "migrate", "rewrite",
+    "benchmark", "profile", "optimise", "optimize", "analyse", "analyze",
+    "compare", "evaluate", "recommend", "write", "code", "test", "debug",
+    "deploy", "review", "document", "research", "investigate", "audit",
+    "measure", "validate", "integrate", "plan", "estimate", "summarise",
+    "summarize", "translate", "port", "upgrade", "replace", "instrument",
+    "propose", "diagnose", "fix", "improve", "harden", "scale", "secure",
+    "simplify", "extract", "split", "tune", "trace",
+)
+_ORDER = ("trivial", "simple", "moderate", "complex", "expert")
+
+
+def _distinct_verbs(text: str) -> int:
+    """How many different actionable outcomes the request asks for."""
+    found = set()
+    for verb in _ACTION_VERBS:
+        # Prefix match handles inflections: "refactors", "benchmarking", "tests".
+        if re.search(rf"\b{verb}", text):
+            found.add(verb)
+    return len(found)
+
 
 def classify_task(description: str) -> Task:
     """Weighted-lexicon task classifier (deterministic, dependency-free).
@@ -263,5 +290,19 @@ def classify_task(description: str) -> Task:
         order = [Complexity.TRIVIAL, Complexity.SIMPLE, Complexity.MODERATE, Complexity.COMPLEX, Complexity.EXPERT]
         idx = min(len(order) - 1, order.index(complexity) + min(markers, 2))
         complexity = order[idx]
+
+    # Scope floor from the number of distinct deliverables. Only ever raises.
+    verbs = _distinct_verbs(text)
+    if verbs >= 6:
+        floor = Complexity.EXPERT
+    elif verbs >= 4:
+        floor = Complexity.COMPLEX
+    elif verbs >= 2:
+        floor = Complexity.MODERATE
+    else:
+        floor = Complexity.TRIVIAL
+    order = [Complexity.TRIVIAL, Complexity.SIMPLE, Complexity.MODERATE, Complexity.COMPLEX, Complexity.EXPERT]
+    if order.index(floor) > order.index(complexity):
+        complexity = floor
 
     return Task(description=description, task_type=task_type, complexity=complexity)

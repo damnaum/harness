@@ -160,5 +160,109 @@ class TestToolTimeout(unittest.TestCase):
         self.assertIn("kaboom", result.error)
 
 
+class TestToolEdgeCases(unittest.TestCase):
+    """Tools face hostile input from models, not from careful humans."""
+
+    def setUp(self):
+        import tempfile as _tempfile
+
+        from apex.config import ApexConfig
+        from apex.harness import ApexHarness
+
+        self.tmp = _tempfile.TemporaryDirectory()
+        self.harness = ApexHarness(ApexConfig(profile="balanced", workspace=self.tmp.name))
+        self.harness.tools.approval_handler = lambda name, args: True
+        self.root = __import__("pathlib").Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def call(self, name, **arguments):
+        from apex.types import ToolCall
+
+        return self.harness.tools.execute(ToolCall(name=name, arguments=arguments))
+
+    def test_binary_file_is_refused_with_guidance(self):
+        (self.root / "blob.bin").write_bytes(b"\x00\x01\xff" * 50)
+        result = self.call("read_file", path="blob.bin")
+        self.assertFalse(result.success)
+        self.assertIn("binary", result.error)
+        self.assertIn("python_exec", result.error)
+
+    def test_latin1_text_still_reads(self):
+        (self.root / "latin.txt").write_bytes(b"caf\xe9 na\xefve")
+        result = self.call("read_file", path="latin.txt")
+        self.assertTrue(result.success)
+        self.assertIn("caf", result.output)
+
+    def test_large_file_is_truncated_not_loadable_whole(self):
+        (self.root / "big.txt").write_text("x" * 500_000)
+        result = self.call("read_file", path="big.txt")
+        self.assertTrue(result.success)
+        self.assertIn("truncated", result.output)
+        self.assertLess(len(result.output), 400_000)
+
+    def test_directory_is_not_a_file(self):
+        (self.root / "a_dir").mkdir()
+        result = self.call("read_file", path="a_dir")
+        self.assertFalse(result.success)
+        self.assertIn("not a file", result.error)
+
+    def test_missing_required_arguments_are_named(self):
+        for name, args in (("read_file", {}), ("write_file", {"path": "x"}),
+                           ("search_files", {}), ("bash", {}), ("python_exec", {})):
+            result = self.call(name, **args)
+            self.assertFalse(result.success, name)
+            self.assertIn("missing required argument", result.error, name)
+
+    def test_write_file_rejects_non_string_content(self):
+        result = self.call("write_file", path="a.txt", content=5)
+        self.assertFalse(result.success)
+        self.assertIn("string", result.error)
+
+    def test_invalid_regex_is_explained(self):
+        result = self.call("search_files", pattern="[unclosed")
+        self.assertFalse(result.success)
+        self.assertIn("invalid regular expression", result.error)
+
+    def test_search_skips_git_and_binary_suffixes(self):
+        (self.root / "code.py").write_text("needle = 1\n")
+        (self.root / ".git").mkdir()
+        (self.root / ".git" / "config").write_text("needle\n")
+        (self.root / "blob.bin").write_bytes(b"needle\x00")
+        result = self.call("search_files", pattern="needle")
+        self.assertTrue(result.success)
+        self.assertIn("code.py", result.output)
+        self.assertNotIn(".git", result.output)
+        self.assertNotIn("blob.bin", result.output)
+
+    def test_bash_success_reports_exit_zero(self):
+        result = self.call("bash", command="echo hi")
+        self.assertTrue(result.success)
+        self.assertIn("exit=0", result.output)
+        self.assertIn("hi", result.output)
+
+    def test_bash_non_zero_exit_is_a_failure_with_output(self):
+        result = self.call("bash", command="echo boom >&2; exit 2")
+        self.assertFalse(result.success)
+        self.assertIn("exit=2", result.error)
+        self.assertIn("boom", result.error)
+
+    def test_python_exec_traceback_is_a_failure(self):
+        result = self.call("python_exec", code="1/0")
+        self.assertFalse(result.success)
+        self.assertIn("ZeroDivisionError", result.error)
+
+    def test_python_exec_stdout_on_success(self):
+        result = self.call("python_exec", code="print(6*7)")
+        self.assertTrue(result.success)
+        self.assertIn("42", result.output)
+
+    def test_calculator_rejects_code_execution(self):
+        for expression in ("__import__('os').system('id')", "open('/etc/passwd').read()"):
+            result = self.call("calculator", expression=expression)
+            self.assertFalse(result.success, expression)
+
+
 if __name__ == "__main__":
     unittest.main()

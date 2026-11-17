@@ -73,8 +73,10 @@ class BaseProvider:
             if exc.code == 429:
                 raise RateLimitError(f"rate limited by {self.provider_name}: {body}") from exc
             if exc.code in (401, 403):
-                raise ModelUnavailableError(f"auth failed for {self.provider_name}: {body}") from exc
-            raise ModelError(f"{self.provider_name} HTTP {exc.code}: {body}") from exc
+                raise ModelUnavailableError(
+                    f"auth failed for {self.provider_name}: {body}", status=exc.code
+                ) from exc
+            raise ModelError(f"{self.provider_name} HTTP {exc.code}: {body}", status=exc.code) from exc
         except urllib.error.URLError as exc:
             raise ModelUnavailableError(f"{self.provider_name} unreachable: {exc.reason}") from exc
 
@@ -186,7 +188,24 @@ class OpenAICompatibleProvider(BaseProvider):
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        raw = self._post_json_temperature_safe(f"{self.base_url.rstrip('/')}/chat/completions", payload, headers)
+        try:
+            raw = self._post_json_temperature_safe(
+                f"{self.base_url.rstrip('/')}/chat/completions", payload, headers
+            )
+        except ModelError as exc:
+            # Reasoning models (o-series, some gpt-5 variants) reject ``max_tokens``
+            # and require ``max_completion_tokens``. Only retry when the provider
+            # actually says so; otherwise the error must surface.
+            message = str(exc).lower()
+            if "max_tokens" not in message or "max_completion_tokens" not in message:
+                raise
+            retry_payload = {
+                ("max_completion_tokens" if k == "max_tokens" else k): v
+                for k, v in payload.items()
+            }
+            raw = self._post_json_temperature_safe(
+                f"{self.base_url.rstrip('/')}/chat/completions", retry_payload, headers
+            )
         choice = (raw.get("choices") or [{}])[0]
         msg = choice.get("message", {})
         tool_calls = []
@@ -253,10 +272,13 @@ class AnthropicProvider(BaseProvider):
                     })
                 out.append({"role": "assistant", "content": blocks})
             else:
-                out.append({
-                    "role": "user" if m.role != Role.ASSISTANT else "assistant",
-                    "content": m.content,
-                })
+                role = "user" if m.role != Role.ASSISTANT else "assistant"
+                # Merge consecutive plain turns: some gateways reject a
+                # non-alternating sequence even though the API itself tolerates it.
+                if out and out[-1]["role"] == role and isinstance(out[-1]["content"], str):
+                    out[-1]["content"] = f"{out[-1]['content']}\n\n{m.content}".strip()
+                else:
+                    out.append({"role": role, "content": m.content})
         return out or [{"role": "user", "content": "Hello"}]
 
     def complete(self, model, messages, tools=None, temperature=0.7, max_tokens=None):
@@ -266,7 +288,9 @@ class AnthropicProvider(BaseProvider):
         payload: dict[str, Any] = {
             "model": model.id.split("/", 1)[-1],
             "messages": user_msgs,
-            "max_tokens": max_tokens or 4096,
+            # Anthropic requires max_tokens. A hardcoded 4096 truncated long code
+            # answers for models that allow far more; use the model's own limit.
+            "max_tokens": max_tokens or min(getattr(model, "max_output", 8192), 8192),
             "temperature": temperature,
         }
         if system:
@@ -326,7 +350,14 @@ class GoogleProvider(BaseProvider):
                         "response": {"content": m.content},
                     }
                 }
-                contents.append({"role": "user", "parts": [part]})
+                # Gemini expects every functionResponse for one model turn in a
+                # single user turn; one turn per result is rejected or misread.
+                if contents and contents[-1]["role"] == "user" and any(
+                    "functionResponse" in p for p in contents[-1]["parts"]
+                ):
+                    contents[-1]["parts"].append(part)
+                else:
+                    contents.append({"role": "user", "parts": [part]})
             elif m.role == Role.ASSISTANT and m.metadata.get("tool_calls"):
                 parts: list[dict[str, Any]] = []
                 if m.content:
@@ -338,10 +369,14 @@ class GoogleProvider(BaseProvider):
                     }})
                 contents.append({"role": "model", "parts": parts})
             else:
-                contents.append({
-                    "role": "model" if m.role == Role.ASSISTANT else "user",
-                    "parts": [{"text": m.content}],
-                })
+                role = "model" if m.role == Role.ASSISTANT else "user"
+                if contents and contents[-1]["role"] == role and all(
+                    "text" in p for p in contents[-1]["parts"]
+                ):
+                    # Plain consecutive turns of the same role are merged too.
+                    contents[-1]["parts"].append({"text": m.content})
+                else:
+                    contents.append({"role": role, "parts": [{"text": m.content}]})
         return contents or [{"role": "user", "parts": [{"text": "Hello"}]}]
 
     @staticmethod
@@ -365,7 +400,7 @@ class GoogleProvider(BaseProvider):
             "contents": self._wire_messages(messages),
             "generationConfig": {
                 "temperature": temperature,
-                **({"maxOutputTokens": max_tokens} if max_tokens else {}),
+                "maxOutputTokens": max_tokens or min(getattr(model, "max_output", 8192), 16_384),
             },
         }
         if system_text:

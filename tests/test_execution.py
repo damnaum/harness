@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from apex.execution.loop import CircuitBreaker, ReActLoop, RetryPolicy
@@ -84,6 +85,125 @@ class TestRetryAndBreaker(unittest.TestCase):
 
         with self.assertRaises(CircuitOpenError):
             breaker.call(lambda: "never")
+
+
+class TestRetryPolicyIsStatusAware(unittest.TestCase):
+    """Retry transient infrastructure only; never retry a deterministic failure.
+
+    Before this, ``RetryPolicy`` caught bare ``Exception``: an invalid API key
+    was retried three times with exponential backoff (≈3.5s of pure latency for
+    a failure that cannot succeed), and five malformed requests from one caller
+    were enough to open the shared circuit breaker for everybody.
+    """
+
+    def setUp(self):
+        from apex.errors import (
+            BudgetExceededError,
+            CircuitOpenError,
+            ModelError,
+            ModelUnavailableError,
+            RateLimitError,
+            ValidationError,
+        )
+
+        self.errors = {
+            "auth": ModelUnavailableError("auth failed", status=401),
+            "forbidden": ModelUnavailableError("forbidden", status=403),
+            "bad_request": ModelError("malformed", status=400),
+            "server_error": ModelError("upstream exploded", status=500),
+            "rate_limit": RateLimitError("429"),
+            "budget": BudgetExceededError("spent"),
+            "validation": ValidationError("bad"),
+            "circuit": CircuitOpenError("open"),
+        }
+
+    def _counting(self, exc):
+        calls = {"n": 0}
+
+        def failing():
+            calls["n"] += 1
+            raise exc
+
+        return failing, calls
+
+    def test_retryable_statuses_are_retried(self):
+        for name in ("server_error", "rate_limit"):
+            failing, calls = self._counting(self.errors[name])
+            with self.assertRaises(Exception):
+                RetryPolicy(max_retries=2, base_delay=0.001).run(failing)
+            self.assertEqual(calls["n"], 3, f"{name} should be attempted 3 times")
+
+    def test_client_errors_fail_on_the_first_attempt(self):
+        for name in ("auth", "forbidden", "bad_request", "budget", "validation", "circuit"):
+            failing, calls = self._counting(self.errors[name])
+            with self.assertRaises(Exception):
+                RetryPolicy(max_retries=3, base_delay=0.001).run(failing)
+            self.assertEqual(calls["n"], 1, f"{name} must not be retried")
+
+    def test_is_retryable_matrix(self):
+        from apex.errors import is_retryable
+
+        self.assertTrue(is_retryable(self.errors["server_error"]))
+        self.assertTrue(is_retryable(self.errors["rate_limit"]))
+        self.assertTrue(is_retryable(TimeoutError("slow")))
+        self.assertTrue(is_retryable(ConnectionResetError("reset")))
+        for name in ("auth", "forbidden", "bad_request", "budget", "validation", "circuit"):
+            self.assertFalse(is_retryable(self.errors[name]), name)
+
+    def test_no_sleep_for_non_retryable(self):
+        failing, _ = self._counting(self.errors["auth"])
+        started = time.time()
+        with self.assertRaises(Exception):
+            RetryPolicy(max_retries=5, base_delay=0.5).run(failing)
+        self.assertLess(time.time() - started, 0.2, "a non-retryable error must not back off")
+
+    def test_breaker_ignores_bad_requests(self):
+        breaker = CircuitBreaker(failure_threshold=2, cooldown=60)
+
+        def fail():
+            raise self.errors["bad_request"]
+
+        for _ in range(4):
+            with self.assertRaises(Exception):
+                breaker.call(fail)
+        self.assertEqual(breaker.failures, 0, "client errors must not count as outages")
+        # Still serving: a healthy call succeeds.
+        self.assertEqual(breaker.call(lambda: "ok"), "ok")
+
+    def test_breaker_still_opens_on_outages(self):
+        breaker = CircuitBreaker(failure_threshold=2, cooldown=60)
+
+        def fail():
+            raise self.errors["server_error"]
+
+        for _ in range(2):
+            with self.assertRaises(Exception):
+                breaker.call(fail)
+        from apex.errors import CircuitOpenError
+
+        with self.assertRaises(CircuitOpenError):
+            breaker.call(lambda: "never")
+
+    def test_provider_status_survives_the_wire_path(self):
+        from apex.models.base import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(provider_key="openai", api_key="k")
+
+        def http_error(code):
+            import io
+            import urllib.error
+
+            return urllib.error.HTTPError(
+                "https://x", code, "err", {}, io.BytesIO(b'{"error": "nope"}')
+            )
+
+        for code, retryable in ((400, False), (401, False), (429, True), (500, True), (503, True)):
+            provider._post_json = lambda *a, **k: (_ for _ in ()).throw(http_error(code))
+            with self.assertRaises(Exception) as ctx:
+                provider._post_json("u", {}, {})
+            from apex.errors import is_retryable
+
+            self.assertEqual(is_retryable(ctx.exception), retryable, f"HTTP {code}")
 
 
 class TestPlanning(unittest.TestCase):

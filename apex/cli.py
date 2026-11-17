@@ -61,10 +61,10 @@ def _build_config(args: argparse.Namespace) -> ApexConfig:
     return cfg
 
 
-def _harness(args):
+def _harness(args, strict: bool = True):
     from .harness import ApexHarness
 
-    return ApexHarness(config=_build_config(args))
+    return ApexHarness(config=_build_config(args), strict=strict)
 
 
 # --------------------------------------------------------------------------
@@ -171,9 +171,11 @@ def cmd_eval(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    h = _harness(args)
-    print(json.dumps(h.doctor(), indent=2))
-    return 0
+    # strict=False: the whole point of doctor is to explain a broken config.
+    h = _harness(args, strict=False)
+    report = h.doctor()
+    print(json.dumps(report, indent=2))
+    return 0 if not report["config_problems"] else 1
 
 
 def cmd_remember(args) -> int:

@@ -114,6 +114,23 @@ def make_handler(
     allow_origin = cors_origin or os.environ.get("APEX_CORS_ORIGIN", DEFAULT_CORS)
     run_slots = threading.BoundedSemaphore(max(1, max_concurrent_runs))
 
+    # Method-aware route table: an unsupported method on a real route must be a
+    # 405 with an Allow header, not the stdlib's 501 HTML page (which no JSON
+    # client can parse, and which looks like a server bug rather than a
+    # client mistake).
+    ROUTES = {
+        "/health": {"GET", "HEAD"},
+        "/ready": {"GET", "HEAD"},
+        "/v1/models": {"GET", "HEAD"},
+        "/v1/metrics": {"GET", "HEAD"},
+        "/v1/traces": {"GET", "HEAD"},
+        "/v1/memory": {"GET", "HEAD"},
+        "/v1/run": {"POST"},
+        "/v1/route": {"POST"},
+        "/v1/remember": {"POST"},
+        "/v1/eval": {"POST"},
+    }
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "APEX/1.0"
@@ -142,6 +159,9 @@ def make_handler(
                 self.send_header(key, value)
             self._cors()
             self.end_headers()
+            if getattr(self, "_head_only", False):
+                # HEAD carries the GET headers, including the real length, but no body.
+                return
             try:
                 self.wfile.write(body)
             except OSError:  # client disconnected mid-response; nothing to do
@@ -163,6 +183,55 @@ def make_handler(
             return payload, problem
 
         # -- verbs ----------------------------------------------------------
+        def _route(self) -> str:
+            return self.path.split("?", 1)[0]
+
+        def _method_not_allowed(self, path: str) -> None:
+            allowed = ROUTES.get(path)
+            if allowed is None:
+                self._send(404, _error(f"no route for {self.command} {path}", "not_found"))
+                return
+            self._send(
+                405,
+                _error(
+                    f"{self.command} is not allowed on {path}; allowed: {', '.join(sorted(allowed))}",
+                    "method_not_allowed",
+                ),
+                headers={"Allow": ", ".join(sorted(allowed))},
+            )
+
+        def _unsupported(self):  # shared by every verb we do not implement
+            if not self._authorised():
+                self._send(401, _error("missing or invalid bearer token", "unauthorized"))
+                return
+            # Drain a bounded body so a keep-alive connection stays usable;
+            # anything larger is not worth reading for a request we reject.
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+                self.close_connection = True
+            if 0 < length <= MAX_BODY_BYTES:
+                try:
+                    self.rfile.read(length)
+                except OSError:
+                    self.close_connection = True
+            elif length > MAX_BODY_BYTES:
+                self.close_connection = True
+            self._method_not_allowed(self._route())
+
+        do_PUT = _unsupported  # noqa: N815
+        do_PATCH = _unsupported  # noqa: N815
+        do_DELETE = _unsupported  # noqa: N815
+
+        def do_HEAD(self):  # noqa: N802
+            """Same status and headers as GET, no body (probes, load balancers)."""
+            self._head_only = True
+            try:
+                self.do_GET()
+            finally:
+                self._head_only = False
+
         def do_OPTIONS(self):  # noqa: N802 - stdlib naming
             self.send_response(204)
             self._cors()
@@ -194,6 +263,8 @@ def make_handler(
                     self._send(200, {"traces": group_spans_by_trace(spans), "span_count": len(spans)})
                 elif path == "/v1/memory":
                     self._send(200, harness.memory.stats())
+                elif path in ROUTES:
+                    self._method_not_allowed(path)
                 else:
                     self._send(404, _error(f"no route for GET {path}", "not_found"))
             except Exception as exc:  # noqa: BLE001 - never leak a traceback
@@ -217,6 +288,8 @@ def make_handler(
                     self._handle_remember(data or {})
                 elif path == "/v1/eval":
                     self._handle_eval(data or {})
+                elif path in ROUTES:
+                    self._method_not_allowed(path)
                 else:
                     self._send(404, _error(f"no route for POST {path}", "not_found"))
             except Exception as exc:  # noqa: BLE001

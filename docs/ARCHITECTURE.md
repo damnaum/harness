@@ -43,13 +43,13 @@ User / CLI / SDK / HTTP API
 | Concern | Implementation | Failure behaviour |
 |---|---|---|
 | Provider outage | Per-model `CircuitBreaker` (5 failures → 30 s open) + fallback chain | Next model is tried; run continues |
-| Flaky call | `RetryPolicy` exponential backoff + jitter | Retries, then breaker |
+| Flaky call | `RetryPolicy` exponential backoff + jitter, **status-aware** (`errors.is_retryable`) | Retries 429/5xx/timeouts; fails fast on 4xx, auth, budget, guardrails |
 | Hostile input | `Guardrails.inspect_input` signature + PII scan | Run refused, input never leaves the process |
 | Unsafe tool | Approval gate + sandbox path/command validation | Tool returns failed result, loop continues |
 | Hung tool | Wall-clock timeout in `Tool.run` | Failed observation, agent picks another action |
 | Hallucinated tool | Registry returns a failed `ToolResult` | Model sees the error and recovers |
 | Looping agent | Tool-call fingerprint with repeat detection | `LoopDetectedError`, step budget preserved |
-| Long context | `ContextManager` budget + head/tail compaction between agents | Oldest material evicted, conclusion retained |
+| Long context | `ContextManager` budget + head/tail compaction between agents **and inside the ReAct loop** | Oldest material evicted, task restated, tool turns kept valid |
 | Crash | JSON checkpoints per run | `Checkpointer.list_runs()` for recovery |
 | Duplicate facts | Case-insensitive de-duplication in `MemoryStore` | Idempotent remembers |
 | Index drift after eviction | TF-IDF rebuild on trim | Recall stays correct (regression-tested) |
@@ -85,7 +85,10 @@ User / CLI / SDK / HTTP API
 
 1. Token check (constant time) → body parsed with a 1 MB cap → semaphore slot taken.
 2. `Guardrails.check_input` — injection signatures, PII redaction.
-3. `classify_task` — task type + complexity from a weighted lexicon.
+3. `classify_task` — task type from a weighted lexicon; complexity from word
+   count **plus a scope floor**: the number of distinct deliverables (distinct
+   action verbs) raises the class, so a 22-word request to design, implement,
+   benchmark and compare is EXPERT, not SIMPLE. The floor only ever raises.
 4. Memory recall — facts first, then episodes; the current task echoing itself is filtered.
 5. `ModelRouter.route` — score every available model, pick a winner and a fallback chain.
 6. `select_strategy` — one of eight, with a human-readable reason.

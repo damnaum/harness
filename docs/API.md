@@ -12,7 +12,8 @@ All responses are JSON. Errors use a stable shape:
 {"error": "human readable message", "code": "bad_request"}
 ```
 
-`code` is one of `bad_request`, `unauthorized`, `not_found`, `internal_error`.
+`code` is one of `bad_request`, `unauthorized`, `not_found`,
+`method_not_allowed`, `overloaded`, `blocked`, `internal_error`.
 
 Authentication: set `APEX_API_TOKEN` and send `Authorization: Bearer <token>` on
 every request. When the variable is unset, auth is disabled (local development).
@@ -20,6 +21,12 @@ every request. When the variable is unset, auth is disabled (local development).
 CORS: `Access-Control-Allow-Origin` is `*` by default; override with
 `APEX_CORS_ORIGIN`. `OPTIONS` returns `204` with the allowed methods and headers,
 so browsers and embedded iframes can preflight normally.
+
+Methods: a known route with the wrong verb answers `405` and carries an `Allow`
+header (`{"code": "method_not_allowed"}`), never the stdlib's HTML `501`. Any
+verb on an unknown path answers `404`. A rejected request body is drained, so a
+keep-alive connection stays usable. `HEAD` mirrors the `GET` routes: same status
+and headers, no body — use it for probes and load balancers.
 
 ---
 

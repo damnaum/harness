@@ -127,9 +127,13 @@ class Span:
 
 
 class Tracer:
-    def __init__(self, enabled: bool = True) -> None:
+    MAX_SPANS = 5_000  # ring buffer: unbounded span lists are a slow memory leak
+
+    def __init__(self, enabled: bool = True, max_spans: int | None = None) -> None:
         self.enabled = enabled
         self.spans: list[Span] = []
+        self.max_spans = max(int(max_spans or self.MAX_SPANS), 1)
+        self._lock = threading.Lock()
         self._local = threading.local()
 
     def new_trace(self) -> str:
@@ -173,10 +177,14 @@ class Tracer:
         finally:
             span.ended_at = time.time()
             stack.pop()
-            self.spans.append(span)
+            with self._lock:
+                self.spans.append(span)
+                if len(self.spans) > self.max_spans:
+                    del self.spans[: len(self.spans) - self.max_spans]
 
     def export(self, trace_id: Optional[str] = None) -> list[dict[str, Any]]:
-        spans = sorted(self.spans, key=lambda s: s.started_at)
+        with self._lock:
+            spans = sorted(list(self.spans), key=lambda s: s.started_at)
         if trace_id:
             spans = [s for s in spans if s.trace_id == trace_id]
         return [s.to_dict() for s in spans]

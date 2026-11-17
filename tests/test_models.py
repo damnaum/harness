@@ -95,6 +95,70 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(long.complexity, Complexity.EXPERT)
 
 
+class TestScopeClassification(unittest.TestCase):
+    """Complexity must follow the number of deliverables, not just word count.
+
+    A 22-word request to design, implement, benchmark and compare two rate
+    limiters used to be classified SIMPLE — so it got no plan, no swarm and a
+    cheap model. Word count is a poor proxy for scope.
+    """
+
+    CASES = [
+        ("Design and implement a rate limiter, compare token bucket vs sliding "
+         "window, write code, run a benchmark, recommend one", Complexity.EXPERT),
+        ("Analyse why our p99 latency doubled after the migration and propose fixes",
+         Complexity.MODERATE),
+        ("Refactor the payment module into smaller services and migrate the database schema",
+         Complexity.MODERATE),
+        ("Compare Postgres and Cassandra for our workload and recommend one",
+         Complexity.MODERATE),
+        ("Build a REST API with auth, tests and documentation", Complexity.MODERATE),
+        ("Write a function to reverse a string", Complexity.TRIVIAL),
+        ("What is 2 + 2?", Complexity.TRIVIAL),
+        ("Summarise this article in three bullet points", Complexity.TRIVIAL),
+        ("Design, implement, test, deploy, document, benchmark and review a new auth service",
+         Complexity.EXPERT),
+    ]
+
+    def test_scope_floor(self):
+        for text, expected in self.CASES:
+            with self.subTest(task=text[:40]):
+                self.assertEqual(classify_task(text).complexity, expected)
+
+    def test_floor_never_downgrades(self):
+        long_prose = " ".join(["word"] * 200)
+        self.assertEqual(classify_task(long_prose).complexity, Complexity.EXPERT)
+        verbose_one_verb = ("Explain in great detail, over many paragraphs and with several "
+                            "examples, what a hash table is and why it matters " + "context " * 40)
+        self.assertEqual(classify_task(verbose_one_verb).complexity, Complexity.EXPERT)
+
+    def test_multi_part_task_gets_a_plan(self):
+        import tempfile
+
+        from apex.config import ApexConfig
+        from apex.harness import ApexHarness
+
+        with tempfile.TemporaryDirectory() as tmp:
+            harness = ApexHarness(ApexConfig(profile="offline", workspace=tmp))
+            result = harness.run(
+                "Design and implement a rate limiter, compare token bucket vs sliding "
+                "window, write code, run a benchmark, recommend one"
+            )
+        self.assertIsNotNone(result.plan, "a multi-deliverable task must be planned")
+        self.assertTrue(result.agent_results, "a planned task must run through the swarm")
+
+    def test_trivial_task_stays_single_agent(self):
+        import tempfile
+
+        from apex.config import ApexConfig
+        from apex.harness import ApexHarness
+
+        with tempfile.TemporaryDirectory() as tmp:
+            harness = ApexHarness(ApexConfig(profile="offline", workspace=tmp))
+            result = harness.run("What is 2 + 2?")
+        self.assertIsNone(result.plan, "a trivial question must not pay for a swarm")
+
+
 class TestRegistryIntegrity(unittest.TestCase):
     """Guards the invariants other subsystems assume about the registry."""
 

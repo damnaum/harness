@@ -330,5 +330,104 @@ class TestServerClass(unittest.TestCase):
         self.assertGreaterEqual(ApexHTTPServer.request_queue_size, 32)
 
 
+class TestMethodSemantics(_ServerFixture):
+    """Every verb gets a JSON answer and an honest status code.
+
+    The stdlib default is a 501 with an HTML body, which a JSON client cannot
+    parse and which reads like a server defect rather than a client mistake.
+    """
+
+    def setUp(self):
+        self._start(token="tok")
+
+    def tearDown(self):
+        self._stop()
+
+    def test_unsupported_methods_are_405_not_501(self):
+        for method in ("PUT", "PATCH", "DELETE"):
+            status, payload, headers = _request(
+                self.port, "/v1/run", method=method, token="tok",
+                body=b"{}" if method != "DELETE" else None,
+            )
+            self.assertEqual(status, 405, f"{method} got {status}")
+            self.assertEqual(payload["code"], "method_not_allowed")
+            self.assertEqual(headers.get("Allow"), "POST")
+
+    def test_get_on_post_only_route_is_405(self):
+        status, payload, headers = _request(self.port, "/v1/run", token="tok")
+        self.assertEqual(status, 405)
+        self.assertEqual(headers.get("Allow"), "POST")
+        self.assertIn("POST", payload["error"])
+
+    def test_post_on_get_only_route_is_405(self):
+        status, payload, headers = _request(
+            self.port, "/health", method="POST", token="tok", body=b"{}"
+        )
+        self.assertEqual(status, 405)
+        self.assertEqual(headers.get("Allow"), "GET, HEAD")
+        self.assertIn("GET", payload["error"])
+
+    def test_unknown_route_still_404_for_any_method(self):
+        for method in ("PUT", "DELETE", "PATCH"):
+            status, payload, _ = _request(self.port, "/v1/nope", method=method, token="tok")
+            self.assertEqual(status, 404, f"{method} on unknown route")
+            self.assertEqual(payload["code"], "not_found")
+
+    def test_unauthenticated_put_is_401(self):
+        status, payload, _ = _request(self.port, "/v1/run", method="PUT", body=b"{}")
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["code"], "unauthorized")
+
+    def test_head_matches_get_without_a_body(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("HEAD", "/health", headers={"Authorization": "Bearer tok"})
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b"")
+            self.assertIsNotNone(response.getheader("Content-Length"))
+            self.assertGreater(int(response.getheader("Content-Length")), 0)
+        finally:
+            conn.close()
+
+    def test_head_on_post_only_route_is_405(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("HEAD", "/v1/run", headers={"Authorization": "Bearer tok"})
+            response = conn.getresponse()
+            self.assertEqual(response.status, 405)
+            response.read()
+        finally:
+            conn.close()
+
+    def test_options_advertises_the_verbs(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("OPTIONS", "/v1/run")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 204)
+            self.assertIn("POST", response.getheader("Access-Control-Allow-Methods"))
+            response.read()
+        finally:
+            conn.close()
+
+    def test_rejected_body_does_not_poison_the_connection(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            body = json.dumps({"task": "ignored"}).encode()
+            conn.request("PUT", "/v1/run", body=body,
+                         headers={"Authorization": "Bearer tok", "Content-Type": "application/json"})
+            first = conn.getresponse()
+            self.assertEqual(first.status, 405)
+            first.read()
+            # Same socket, next request: the server must have drained the body.
+            conn.request("GET", "/health", headers={"Authorization": "Bearer tok"})
+            second = conn.getresponse()
+            self.assertEqual(second.status, 200)
+            second.read()
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

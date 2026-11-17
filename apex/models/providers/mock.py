@@ -1016,6 +1016,11 @@ class MockProvider(BaseProvider):
 
     # ------------------------------------------------------------------
     def _wants_tool(self, low: str) -> bool:
+        # A concrete filename is the strongest signal there is: "read notes.txt and
+        # tell me the release" has no word "file" in it, yet is unambiguously a tool
+        # task. _make_tool_call already knows how to act on it.
+        if re.search(r"\b[\w./\\-]+\.(?:py|txt|md|json|ya?ml|csv|toml|log|html?)\b", low):
+            return True
         return bool(
             re.search(r"\b(read|open|list|search|find|fetch|download|browse|run|execute|calculate|compute|git)\b", low)
             and re.search(r"\bfile|folder|directory|web|url|page|internet|command|shell|repository|repo|math|expression\b", low)

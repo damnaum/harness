@@ -15,6 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ...errors import ToolError
 from ..base import Tool
 from ..sandbox import (
     check_command,
@@ -24,6 +25,43 @@ from ..sandbox import (
     restricted_env,
     safe_path,
 )
+
+
+# ---------------------------------------------------------------- helpers
+def _required(arguments: dict[str, Any], name: str) -> Any:
+    """Fetch a required argument with a message a model can act on.
+
+    ``arguments["path"]`` on a missing key raises ``KeyError('path')``, which the
+    loop renders as ``ERROR: 'path'`` — technically correct, useless to a model.
+    """
+    if name not in arguments:
+        raise ValueError(f"missing required argument '{name}'")
+    return arguments[name]
+
+
+def _text_of(path: Path, limit: int = 200_000) -> str:
+    """Read a file as text, refusing binaries and capping the size."""
+    size = path.stat().st_size
+    with open(path, "rb") as handle:
+        head = handle.read(8192)
+    if b"\x00" in head:
+        raise ValueError(
+            f"binary file ({size} bytes) — read_file handles text only; "
+            "use python_exec or bash if you need the bytes"
+        )
+    try:
+        head.decode("utf-8")
+        encoding_ok = True
+    except UnicodeDecodeError:
+        encoding_ok = False
+    if not encoding_ok and size > 0:
+        # Not UTF-8 in the first block: latin-1 cannot fail, but say so.
+        text = path.read_bytes()[:limit].decode("latin-1")
+        return text + ("\n...[truncated]" if size > limit else "")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if len(text) > limit:
+        return text[:limit] + f"\n...[truncated: {len(text) - limit} more chars]"
+    return text
 
 
 # ---------------------------------------------------------------- filesystem
@@ -36,12 +74,13 @@ class ReadFileTool(Tool):
         self.root = Path(root).resolve()
 
     def execute(self, arguments):
-        path = safe_path(self.root, arguments["path"])
+        raw_path = _required(arguments, "path")
+        path = safe_path(self.root, raw_path)
         if not path.exists():
-            raise FileNotFoundError(f"no such file: {arguments['path']}")
-        if path.stat().st_size > 500_000:
-            raise ValueError("file too large (>500KB)")
-        return path.read_text(encoding="utf-8", errors="replace")
+            raise FileNotFoundError(f"no such file: {raw_path}")
+        if not path.is_file():
+            raise ValueError(f"not a file: {raw_path}")
+        return _text_of(path)
 
 
 class WriteFileTool(Tool):
@@ -54,10 +93,14 @@ class WriteFileTool(Tool):
         self.root = Path(root).resolve()
 
     def execute(self, arguments):
-        path = safe_path(self.root, arguments["path"])
+        raw_path = _required(arguments, "path")
+        content = _required(arguments, "content")
+        if not isinstance(content, str):
+            raise ValueError("'content' must be a string")
+        path = safe_path(self.root, raw_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(arguments["content"], encoding="utf-8")
-        return f"wrote {len(arguments['content'])} chars to {arguments['path']}"
+        path.write_text(content, encoding="utf-8")
+        return f"wrote {len(content)} chars to {raw_path}"
 
 
 class ListDirTool(Tool):
@@ -84,23 +127,44 @@ class SearchFilesTool(Tool):
     def __init__(self, root: str):
         self.root = Path(root).resolve()
 
+    MAX_FILE_BYTES = 2_000_000  # never load a log/artifact dump into memory
+    MAX_FILES = 5_000
+
     def execute(self, arguments):
-        pattern = arguments["pattern"]
+        pattern = _required(arguments, "pattern")
+        if not isinstance(pattern, str) or not pattern:
+            raise ValueError("'pattern' must be a non-empty string")
         if len(pattern) > 500:
             raise ValueError("pattern too long (max 500 chars)")
         base = safe_path(self.root, arguments.get("path", "."))
-        rx = re.compile(pattern)
+        if not base.is_dir():
+            raise FileNotFoundError(f"no such directory: {arguments.get('path', '.')}")
+        try:
+            rx = re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"invalid regular expression: {exc}") from exc
         hits = []
+        scanned = 0
         for f in base.rglob("*"):
-            if f.is_file() and f.suffix in (".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".js", ".ts") and ".git" not in f.parts:
-                try:
-                    for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if scanned >= self.MAX_FILES:
+                hits.append(f"...[stopped after {self.MAX_FILES} files]")
+                break
+            if not f.is_file() or ".git" in f.parts:
+                continue
+            if f.suffix not in (".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".js", ".ts"):
+                continue
+            try:
+                if f.stat().st_size > self.MAX_FILE_BYTES:
+                    continue
+                scanned += 1
+                with open(f, encoding="utf-8", errors="replace") as handle:
+                    for i, line in enumerate(handle, 1):
                         if rx.search(line):
                             hits.append(f"{f.relative_to(self.root)}:{i}: {line.strip()[:160]}")
                             if len(hits) >= 50:
                                 return "\n".join(hits) + "\n...[more]"
-                except OSError:
-                    continue
+            except OSError:
+                continue
         return "\n".join(hits) if hits else "(no matches)"
 
 
@@ -118,7 +182,7 @@ class BashTool(Tool):
         self.timeout = timeout
 
     def execute(self, arguments):
-        cmd = arguments["command"]
+        cmd = _required(arguments, "command")
         if not isinstance(cmd, str) or not cmd.strip():
             raise ValueError("command must be a non-empty string")
         check_command(cmd)
@@ -127,7 +191,12 @@ class BashTool(Tool):
             timeout=self.timeout, env=restricted_env(),
         )
         out = (proc.stdout or "") + (("\nSTDERR:\n" + proc.stderr) if proc.stderr else "")
-        return f"exit={proc.returncode}\n{out.strip()}"
+        out = out.strip()
+        if proc.returncode != 0:
+            # A non-zero exit is a failure the model has to react to. Reporting it
+            # as success made agents retry the same broken command.
+            raise ToolError(f"exit={proc.returncode}\n{out}" if out else f"exit={proc.returncode}")
+        return f"exit=0\n{out}" if out else "exit=0"
 
 
 class PythonExecTool(Tool):
@@ -141,13 +210,18 @@ class PythonExecTool(Tool):
         self.timeout = timeout
 
     def execute(self, arguments):
-        code = arguments["code"]
+        code = _required(arguments, "code")
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError("code must be a non-empty string")
         proc = subprocess.run(
             ["python3", "-c", code], cwd=self.root, capture_output=True, text=True,
             timeout=self.timeout, env=restricted_env(),
         )
         out = (proc.stdout or "") + (("\nSTDERR:\n" + proc.stderr) if proc.stderr else "")
-        return f"exit={proc.returncode}\n{out.strip()}"
+        out = out.strip()
+        if proc.returncode != 0:
+            raise ToolError(f"exit={proc.returncode}\n{out}" if out else f"exit={proc.returncode}")
+        return f"exit=0\n{out}" if out else "exit=0"
 
 
 # ---------------------------------------------------------------- calculator (safe AST eval)
@@ -188,7 +262,7 @@ class CalculatorTool(Tool):
     parameters = {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]}
 
     def execute(self, arguments):
-        expr = arguments["expression"].strip()
+        expr = str(_required(arguments, "expression")).strip()
         result = _eval(ast.parse(expr, mode="eval"))
         return f"{expr} = {result}"
 
@@ -200,7 +274,7 @@ class WebFetchTool(Tool):
     parameters = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
 
     def execute(self, arguments):
-        url = check_url(arguments["url"])
+        url = check_url(_required(arguments, "url"))
         req = urllib.request.Request(url, headers={"User-Agent": "APEX-harness/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             text = read_limited(resp, 1_000_000).decode("utf-8", errors="replace")
@@ -217,7 +291,7 @@ class WebSearchTool(Tool):
     def execute(self, arguments):
         import urllib.parse
 
-        q = urllib.parse.quote(arguments["query"])
+        q = urllib.parse.quote(str(_required(arguments, "query")))
         url = f"https://html.duckduckgo.com/html/?q={q}"
         req = urllib.request.Request(url, headers={"User-Agent": "APEX-harness/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:

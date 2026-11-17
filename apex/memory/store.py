@@ -14,6 +14,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -222,7 +223,10 @@ class MemoryStore:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(self.snapshot(), ensure_ascii=False, indent=1)
-        tmp = target.with_suffix(target.suffix + ".tmp")
+        # Unique temp name per writer: two threads (or processes) saving at once
+        # used to collide on "<path>.tmp" and one rename failed with ENOENT.
+        unique = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}"
+        tmp = target.with_suffix(f"{target.suffix}.{unique}.tmp")
         try:
             with open(tmp, "w", encoding="utf-8") as handle:
                 handle.write(payload)

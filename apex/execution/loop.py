@@ -14,7 +14,12 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..errors import CircuitOpenError, LoopDetectedError, MaxStepsExceededError
+from ..errors import (
+    CircuitOpenError,
+    LoopDetectedError,
+    MaxStepsExceededError,
+    is_retryable,
+)
 from ..types import Message, Role, ToolCall
 
 
@@ -34,8 +39,9 @@ class RetryPolicy:
                 return fn(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if attempt < self.max_retries:
-                    time.sleep(self.delay(attempt))
+                if attempt >= self.max_retries or not is_retryable(exc):
+                    raise
+                time.sleep(self.delay(attempt))
         raise last_exc
 
 
@@ -58,10 +64,13 @@ class CircuitBreaker:
             result = fn(*args, **kwargs)
             self.failures = 0
             return result
-        except Exception:
-            self.failures += 1
-            if self.failures >= self.failure_threshold:
-                self.opened_at = time.time()
+        except Exception as exc:  # noqa: BLE001
+            # Only infrastructure failures count. A burst of invalid requests
+            # must not open the breaker on healthy traffic.
+            if is_retryable(exc):
+                self.failures += 1
+                if self.failures >= self.failure_threshold:
+                    self.opened_at = time.time()
             raise
 
 

@@ -226,5 +226,30 @@ class TestExplicitModelSelection(unittest.TestCase):
         self.assertFalse(any("unknown model" in w for w in result.warnings))
 
 
+class TestInputGuards(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.harness = ApexHarness(ApexConfig(profile="offline", workspace=self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_empty_task_is_rejected_without_running(self):
+        for task in ("", "   ", "\n\t "):
+            result = self.harness.run(task)
+            self.assertFalse(result.success, repr(task))
+            self.assertIn("empty task", " ".join(result.warnings))
+            self.assertEqual(result.total_cost_usd, 0.0)
+
+    def test_whitespace_padded_task_still_runs(self):
+        result = self.harness.run("   What is 2 + 2?   ")
+        self.assertTrue(result.success)
+
+    def test_unicode_task_is_not_rejected(self):
+        result = self.harness.run("कृपया 2 + 2 बताइए")
+        self.assertTrue(result.success)
+        self.assertTrue(result.output)
+
+
 if __name__ == "__main__":
     unittest.main()

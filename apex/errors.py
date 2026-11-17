@@ -17,13 +17,25 @@ class ConfigError(ApexError):
 class ModelError(ApexError):
     code = "model_error"
 
+    def __init__(self, message: str = "", *, status: int | None = None) -> None:
+        super().__init__(message)
+        # HTTP status, when the error came from a provider. Retry decisions need
+        # it: a 500 is worth another attempt, a 400 never is.
+        self.status = status
+
 
 class ModelUnavailableError(ModelError):
     code = "model_unavailable"
 
+    def __init__(self, message: str = "", *, status: int | None = None) -> None:
+        super().__init__(message, status=status)
+
 
 class RateLimitError(ModelError):
     code = "rate_limit"
+
+    def __init__(self, message: str = "", *, status: int | None = 429) -> None:
+        super().__init__(message, status=status)
 
 
 class ContextOverflowError(ModelError):
@@ -94,3 +106,36 @@ class CircuitOpenError(ApexError):
 
 class ValidationError(ApexError):
     code = "validation_error"
+
+
+#: Failures that mean "the request itself is wrong" — retrying cannot help and
+#: counting them against a circuit breaker would let one bad caller take the
+#: whole service down.
+_NON_RETRYABLE = (
+    ConfigError,
+    ValidationError,
+    BudgetExceededError,
+    SafetyError,
+    ToolPermissionError,
+    ToolNotFoundError,
+    CircuitOpenError,
+)
+
+
+def is_retryable(exc: BaseException) -> bool:
+    """Should the caller try this exact call again?
+
+    Retry is for *transient infrastructure*: rate limits, 5xx, timeouts, broken
+    connections. A 400 from a malformed payload, a 401 from a bad key, a budget
+    stop or a guardrail block will fail identically every time, so retrying only
+    adds latency (and, for auth, looks like credential stuffing).
+    """
+    if isinstance(exc, _NON_RETRYABLE):
+        return False
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        if status == 429 or status >= 500:
+            return True
+        if 400 <= status < 500:
+            return False
+    return True
