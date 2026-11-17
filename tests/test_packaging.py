@@ -9,8 +9,12 @@ tests import from the working tree, not from an installed wheel).
 from __future__ import annotations
 
 import pathlib
-import tomllib
 import unittest
+
+try:  # `python -m unittest discover -s tests`
+    from toml_compat import TomlError, loads, loads_fallback
+except ModuleNotFoundError:  # `python -m unittest tests.test_packaging`
+    from tests.toml_compat import TomlError, loads, loads_fallback
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -18,7 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 class TestPyproject(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        cls.data = loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         cls.project = cls.data["project"]
 
     def test_dependencies_is_a_list_of_strings(self):
@@ -85,6 +89,63 @@ class TestArtifacts(unittest.TestCase):
         self.assertTrue((ROOT / "LICENSE").is_file())
         for doc in ("SECURITY.md", "CHANGELOG.md", "docs/SECURITY.md", "docs/OPERATIONS.md"):
             self.assertTrue((ROOT / doc).is_file(), doc)
+
+
+class TestTomlReader(unittest.TestCase):
+    """The 3.10 path must parse exactly what ``tomllib`` parses.
+
+    ``tomllib`` is 3.11+, but the package claims ``requires-python = ">=3.10"``,
+    so the packaging tests used to die at import time on 3.10 — red CI on one
+    interpreter, and the packaging assertions silently absent. The fallback
+    reader below runs on every version; where ``tomllib`` exists the two are
+    compared, so 3.11-3.13 keep proving the code that 3.10 executes.
+    """
+
+    SAMPLES = [
+        'name = "apex-harness"\nversion = "1.0.0"\n',
+        '[project]\nrequires-python = ">=3.10"\ndependencies = []\n',
+        '[project]\nkeywords = ["a", "b", "c"]\n',
+        "# a comment\n[project]\nname = \"x#y\"  # trailing comment\n\n[tool.x]\nvalue = 1\n",
+        "[project]\nclassifiers = [\n  \"A\",\n  \"B\",\n]\n",
+        '[project]\nlicense = { text = "MIT" }\nauthors = [{ name = "APEX" }]\n',
+        '[[tool.matrix]]\nname = "a"\n[[tool.matrix]]\nname = "b"\n',
+        "[tool.setuptools.packages.find]\ninclude = [\"apex*\"]\n",
+        "[a]\nenabled = true\ndisabled = false\nratio = 0.5\ncount = 42\nnegative = -7\n",
+    ]
+
+    def test_samples_match_tomllib(self):
+        try:
+            import tomllib
+        except ImportError:  # pragma: no cover - 3.10 only
+            self.skipTest("tomllib is 3.11+; the fallback is exercised by the other tests")
+        for sample in self.SAMPLES:
+            with self.subTest(sample=sample[:30]):
+                self.assertEqual(loads_fallback(sample), tomllib.loads(sample))
+
+    def test_real_pyproject_matches_tomllib(self):
+        try:
+            import tomllib
+        except ImportError:  # pragma: no cover - 3.10 only
+            self.skipTest("tomllib is 3.11+")
+
+        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertEqual(loads_fallback(text), tomllib.loads(text))
+
+    def test_pyproject_facts_without_tomllib(self):
+        """The facts the packaging tests rely on, read by the fallback only."""
+        data = loads_fallback((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(data["project"]["name"], "apex-harness")
+        self.assertEqual(data["project"]["requires-python"], ">=3.10")
+        self.assertEqual(data["project"]["dependencies"], [])
+        self.assertIn("apex", data["project"]["scripts"])
+        self.assertIn("apex*", data["tool"]["setuptools"]["packages"]["find"]["include"])
+        self.assertIn("MIT", str(data["project"]["license"]))
+
+    def test_malformed_input_is_rejected(self):
+        for broken in ("key", "[unclosed", 'key = "unterminated', "k = "):
+            with self.subTest(broken=broken):
+                with self.assertRaises((TomlError, ValueError)):
+                    loads_fallback(broken)
 
 
 if __name__ == "__main__":

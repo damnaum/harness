@@ -13,6 +13,15 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+try:  # `python -m unittest discover -s tests`
+    from toml_compat import loads as _toml_loads
+except ModuleNotFoundError:  # `python -m unittest tests.test_docs_consistency`
+    from tests.toml_compat import loads as _toml_loads
+
+
+def _pyproject() -> dict:
+    return _toml_loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
 
 def _suite_size() -> int:
     import unittest as ut
@@ -111,10 +120,8 @@ class TestDocs(unittest.TestCase):
         self.assertEqual(missing, [], f"undocumented routes: {missing}")
 
     def test_license_file_matches_metadata(self):
-        import tomllib
-
+        project = _pyproject()["project"]
         license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
-        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
         self.assertIn("MIT", str(project["license"]))
         self.assertIn("MIT", license_text)
 
