@@ -157,6 +157,9 @@ class ApexHarness:
         trace_id = self.tracer.new_trace()
         task_id = f"task_{uuid.uuid4().hex[:8]}"
         warnings: list[str] = []
+        # Per-run warning buffer (deduplicated inside _warn_once).
+        self._warn_seen = set()
+        self._warn_buffer = []
 
         with self.tracer.span("harness.run", task=task_description[:120]):
             # 1. safety on input
@@ -264,8 +267,14 @@ class ApexHarness:
                     strategy=chosen_strategy, plan=plan, agent_results=agent_results,
                     total_tokens_in=tokens_in, total_tokens_out=tokens_out,
                     total_cost_usd=total_cost, duration_ms=(time.time() - start) * 1000,
-                    trace_id=trace_id, warnings=[str(exc)],
+                    trace_id=trace_id,
+                    warnings=[str(exc)] + list(getattr(self, "_warn_buffer", []) or []),
                 )
+
+            # flush warnings raised deeper in the stack (e.g. sampling guard)
+            for extra in list(getattr(self, "_warn_buffer", []) or []):
+                if extra not in warnings:
+                    warnings.append(extra)
 
             # 7. output safety
             if self.config.safety.enabled:
@@ -399,6 +408,20 @@ class ApexHarness:
             return "stopped: step budget exhausted before a final answer"
 
         samples = spec.samples if spec.samples > 1 else 1
+        if samples > 1 and needs_tools:
+            # Sampling re-runs the whole tool loop. With read-only tools that is
+            # just cost; with write_file/bash/python_exec it means the same side
+            # effect happens N times. Refuse the dangerous half of that trade.
+            if self._side_effecting_tools():
+                self._emit("sampling_disabled", strategy=spec.strategy.value,
+                           reason="side-effecting tools in scope")
+                self._warn_once(
+                    "sampling_disabled",
+                    f"{spec.strategy.value} sampling disabled: the tool set includes "
+                    f"side-effecting tools ({', '.join(sorted(self._side_effecting_tools()))}); "
+                    "re-running the loop would repeat writes/commands",
+                )
+                samples = 1
         answers = [solve_once() for _ in range(samples)]
 
         if samples > 1 and spec.strategy == ReasoningStrategy.SELF_CONSISTENCY:
@@ -434,6 +457,26 @@ class ApexHarness:
         return output.strip(), tokens_in, tokens_out, cost, model_used
 
     # ------------------------------------------------------------------
+    SIDE_EFFECTING_TOOLS = frozenset({"bash", "write_file", "python_exec"})
+
+    def _side_effecting_tools(self) -> set[str]:
+        available = set(self.tools.names())
+        return available & self.SIDE_EFFECTING_TOOLS
+
+    def _warn_once(self, key: str, message: str) -> None:
+        """Record a warning once per run (not once per model call)."""
+        seen = getattr(self, "_warn_seen", None)
+        if seen is None:
+            seen = self._warn_seen = set()
+        if key in seen:
+            return
+        seen.add(key)
+        # Warnings live on the result, so buffer them for the caller to collect.
+        buffered = getattr(self, "_warn_buffer", None)
+        if buffered is None:
+            buffered = self._warn_buffer = []
+        buffered.append(message)
+
     def _persist_memory(self) -> None:
         """Best-effort durable memory write; never fails a run."""
         if not (self.config.memory.enabled and self.config.memory.persist):

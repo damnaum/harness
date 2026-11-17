@@ -27,6 +27,16 @@ explains when each wins and what it costs.
 Every decision returns a human-readable reason, surfaced in
 `HarnessResult.metadata` and the `strategy_selected` event — no black boxes.
 
+## Sampling and side effects
+
+Self-Consistency (5 samples), ToT and LATS (3 branches) re-run the entire tool
+loop per sample. That is the point for read-only tools, and unacceptable when
+`write_file`, `bash` or `python_exec` are in scope — the same write or command
+would happen N times. In that situation APEX refuses to sample: it runs once,
+emits a `sampling_disabled` event and adds a warning to the result. If you want
+branching with side-effecting tools, remove them for that task (`tools.remove(...)`)
+or use Reflexion, which revises rather than repeats.
+
 ## Critic gating
 
 After execution, the heuristic critic scores the output (structure, hedging,

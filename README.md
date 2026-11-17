@@ -46,7 +46,7 @@ budgeting) built in rather than bolted on.
 
 ```bash
 pip install -e .          # or: pip install -e ".[dev]" for pytest/ruff
-python -m unittest discover -s tests    # 400 tests, no network, no keys
+python -m unittest discover -s tests    # 404 tests, no network, no keys
 ```
 
 Python 3.10+. Zero hard dependencies.
@@ -180,6 +180,7 @@ Offline it scores **100% pass, ~0.89 mean** — a regression baseline for the ha
 | Tool name hallucinated | Failed observation returned to the model, run continues |
 | Tool hangs | Wall-clock timeout, failed observation, loop continues |
 | Agent loops | Repeated-call fingerprint detection stops it |
+| Sampling with write tools | Sampling disabled (would repeat the write), warning + event |
 | Context grows | Biggest tool outputs summarised, oldest turns evicted, system kept |
 | Tool output contains instructions | Observation tagged `[UNTRUSTED DATA]` and the attempt recorded |
 | Memory file unwritable | Warning logged, run continues (persistence is best-effort) |
@@ -191,7 +192,7 @@ Offline it scores **100% pass, ~0.89 mean** — a regression baseline for the ha
 ## Testing
 
 ```bash
-python -m unittest discover -s tests -v     # 400 tests
+python -m unittest discover -s tests -v     # 404 tests
 python -m pytest tests -q                   # if pytest is installed
 ruff check apex tests
 ```

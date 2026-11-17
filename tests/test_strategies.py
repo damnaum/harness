@@ -159,5 +159,68 @@ class TestHarnessStrategyExecution(unittest.TestCase):
         self.assertTrue(self.apex.tracer.export())
 
 
+class TestSamplingSafety(unittest.TestCase):
+    """Sampling must never repeat a side effect.
+
+    Self-consistency/ToT/LATS re-run the whole tool loop N times. With read-only
+    tools that is mere cost; ``write_file``/``bash``/``python_exec`` would perform
+    the same write or command N times. The harness must refuse to sample then.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        from apex.config import ApexConfig
+        from apex.harness import ApexHarness
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.harness = ApexHarness(ApexConfig(profile="offline", workspace=self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_self_consistency_disabled_with_write_tools(self):
+        from apex.types import ReasoningStrategy
+
+        result = self.harness.run(
+            "Write a Python function that adds two numbers",
+            strategy=ReasoningStrategy.SELF_CONSISTENCY,
+        )
+        self.assertTrue(result.success)
+        self.assertTrue(
+            any("sampling disabled" in w for w in result.warnings),
+            f"expected a sampling warning, got {result.warnings}",
+        )
+
+    def test_warning_recorded_in_event_stream(self):
+        from apex.types import ReasoningStrategy
+
+        seen = []
+        self.harness.events.subscribe("*", lambda event: seen.append(event.type))
+        self.harness.run(
+            "Write a Python function that reverses a string",
+            strategy=ReasoningStrategy.SELF_CONSISTENCY,
+        )
+        self.assertIn("sampling_disabled", seen)
+
+    def test_no_warning_when_sampling_is_safe(self):
+        from apex.types import ReasoningStrategy
+
+        # Strip the side-effecting tools; sampling should then proceed normally.
+        for name in ("bash", "write_file", "python_exec"):
+            self.harness.tools.tools.pop(name, None)
+        result = self.harness.run(
+            "Prove that the square root of 2 is irrational",
+            strategy=ReasoningStrategy.SELF_CONSISTENCY,
+        )
+        self.assertFalse(any("sampling disabled" in w for w in result.warnings))
+
+    def test_side_effecting_tool_detection(self):
+        self.assertEqual(
+            self.harness._side_effecting_tools(),
+            {"bash", "python_exec", "write_file"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
