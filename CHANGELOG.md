@@ -42,6 +42,6 @@ First production release. Standard-library only; no runtime dependencies.
   `/v1/traces`.
 - Hard per-run spend cap (`models.max_cost_usd`) that binds on both the
   single-agent and swarm paths.
-- 414 tests, offline and key-free; 11-task eval suite with three
+- 426 tests, offline and key-free; 11-task eval suite with three
   execution-verified coding tasks; `apex eval --min-pass-rate` as a CI gate.
 - Production `Dockerfile` (non-root, healthcheck, volume, `prod` profile).

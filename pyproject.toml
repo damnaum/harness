@@ -24,14 +24,14 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
+# Zero hard dependencies: core runs on the Python standard library alone.
+# Provider SDKs are optional and accessed via stdlib HTTP.
+dependencies = []
 
 [project.urls]
 Documentation = "https://github.com/damnaum/harness/blob/main/docs/ARCHITECTURE.md"
 Source = "https://github.com/damnaum/harness"
 Changelog = "https://github.com/damnaum/harness/commits/main"
-# Zero hard dependencies: core runs on the Python standard library alone.
-# Provider SDKs are optional and accessed via stdlib HTTP.
-dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.4"]
