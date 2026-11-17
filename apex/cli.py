@@ -109,18 +109,36 @@ def cmd_models(args) -> int:
 
 
 def cmd_route(args) -> int:
-    from .models.router import classify_task
+    from .models.router import ModelRouter, classify_task
 
     h = _harness(args)
     task = classify_task(args.task)
-    decision = h.router.route(task, preferred=args.model)
+    router = h.router
+    if getattr(args, "all_available", False):
+        # Preview what routing would pick if every provider had credentials.
+        router = ModelRouter(mode=h.config.models.router_mode, available_providers=None)
+    decision = router.route(task, preferred=args.model)
     payload = decision.to_dict()
     payload["classification"] = {
         "task_type": task.task_type.value,
         "complexity": task.complexity.value,
     }
-    if getattr(args, "json", False) or True:
+    if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"task       : {args.task}")
+    print(f"classified : {task.task_type.value} / {task.complexity.value}")
+    print(f"model      : {decision.model.id}  (score {decision.score:.3f})")
+    print(f"reason     : {decision.reason}")
+    print(f"est cost   : ${decision.estimated_cost:.4f} for ~3k tokens")
+    fallbacks = ", ".join(m.id for m in decision.fallbacks) or "(none)"
+    print(f"fallbacks  : {fallbacks}")
+    if getattr(args, "all_available", False):
+        print("note       : preview of frontier routing (every provider assumed available)")
+    elif h.degraded:
+        print("note       : no provider credentials — this is the offline fallback; "
+              "use --all-available to preview frontier routing")
     return 0
 
 
@@ -179,6 +197,9 @@ def cmd_serve(args) -> int:
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="apex", description="APEX agentic harness")
+    from . import __version__
+
+    parser.add_argument("--version", action="version", version=f"apex {__version__}")
     parser.add_argument("--profile", choices=PROFILES, default=None,
                         help="fast | balanced | quality | offline | prod")
     parser.add_argument("--workspace", default=None, help="sandbox root (default: .)")
@@ -200,6 +221,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_route = sub.add_parser("route", help="show the routing decision for a task")
     p_route.add_argument("task")
     p_route.add_argument("--json", action="store_true")
+    p_route.add_argument("--all-available", action="store_true", dest="all_available",
+                         help="preview routing as if every provider had credentials")
     p_route.set_defaults(func=cmd_route)
 
     p_eval = sub.add_parser("eval", help="run the benchmark suite")

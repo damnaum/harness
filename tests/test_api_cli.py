@@ -249,6 +249,72 @@ class TestCli(unittest.TestCase):
         self.assertNotIn("root:", proc.stdout)
 
 
+class TestCliRoutingOutput(unittest.TestCase):
+    """`apex route` is the human-facing explanation of a routing decision."""
+
+    def _run(self, *argv):
+        import io
+        import sys
+        from contextlib import redirect_stdout
+        from apex.cli import main
+
+        buffer = io.StringIO()
+        out, err = sys.stdout, sys.stderr
+        try:
+            sys.stdout = buffer
+            with redirect_stdout(buffer):
+                code = main(list(argv))
+        finally:
+            sys.stdout, sys.stderr = out, err
+        return code, buffer.getvalue()
+
+    def test_version(self):
+        import contextlib
+        import io
+
+        from apex import __version__
+        from apex.cli import main
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), self.assertRaises(SystemExit) as ctx:
+            main(["--version"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn(__version__, buffer.getvalue())
+
+    def test_route_text_output(self):
+        code, output = self._run("--profile", "offline", "route", "Calculate 2 + 2")
+        self.assertEqual(code, 0)
+        self.assertIn("classified", output)
+        self.assertIn("fallbacks", output)
+        self.assertNotIn("{", output)  # text mode is not raw JSON
+
+    def test_route_json_output(self):
+        import json as jsonlib
+
+        code, output = self._run("--profile", "offline", "route", "Calculate 2 + 2", "--json")
+        self.assertEqual(code, 0)
+        payload = jsonlib.loads(output)
+        self.assertIn("model", payload)
+        self.assertIn("classification", payload)
+
+    def test_route_all_available_previews_frontier(self):
+        code, output = self._run(
+            "--profile", "offline", "route", "Write a Python function", "--all-available"
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("mock/apex-mock", output)
+        self.assertIn("preview of frontier routing", output)
+
+    def test_run_json_reports_success(self):
+        import json as jsonlib
+
+        code, output = self._run("--profile", "offline", "run", "What is 6 * 7?", "--json")
+        self.assertEqual(code, 0)
+        payload = jsonlib.loads(output)
+        self.assertTrue(payload["success"])
+        self.assertIn("42", payload["output"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -369,3 +435,69 @@ class TestApiHardening(unittest.TestCase):
         self.assertTrue(payload["traces"])
         self.assertIn("trace_id", payload["traces"][0])
         self.assertTrue(payload["traces"][0]["spans"])
+
+
+class TestCliRoutingOutput(unittest.TestCase):
+    """`apex route` is the human-facing explanation of a routing decision."""
+
+    def _run(self, *argv):
+        import io
+        import sys
+        from contextlib import redirect_stdout
+        from apex.cli import main
+
+        buffer = io.StringIO()
+        out, err = sys.stdout, sys.stderr
+        try:
+            sys.stdout = buffer
+            with redirect_stdout(buffer):
+                code = main(list(argv))
+        finally:
+            sys.stdout, sys.stderr = out, err
+        return code, buffer.getvalue()
+
+    def test_version(self):
+        import contextlib
+        import io
+
+        from apex import __version__
+        from apex.cli import main
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), self.assertRaises(SystemExit) as ctx:
+            main(["--version"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn(__version__, buffer.getvalue())
+
+    def test_route_text_output(self):
+        code, output = self._run("--profile", "offline", "route", "Calculate 2 + 2")
+        self.assertEqual(code, 0)
+        self.assertIn("classified", output)
+        self.assertIn("fallbacks", output)
+        self.assertNotIn("{", output)  # text mode is not raw JSON
+
+    def test_route_json_output(self):
+        import json as jsonlib
+
+        code, output = self._run("--profile", "offline", "route", "Calculate 2 + 2", "--json")
+        self.assertEqual(code, 0)
+        payload = jsonlib.loads(output)
+        self.assertIn("model", payload)
+        self.assertIn("classification", payload)
+
+    def test_route_all_available_previews_frontier(self):
+        code, output = self._run(
+            "--profile", "offline", "route", "Write a Python function", "--all-available"
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("mock/apex-mock", output)
+        self.assertIn("preview of frontier routing", output)
+
+    def test_run_json_reports_success(self):
+        import json as jsonlib
+
+        code, output = self._run("--profile", "offline", "run", "What is 6 * 7?", "--json")
+        self.assertEqual(code, 0)
+        payload = jsonlib.loads(output)
+        self.assertTrue(payload["success"])
+        self.assertIn("42", payload["output"])

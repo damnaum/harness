@@ -95,7 +95,10 @@ How the router actually uses each family:
   credentials. It is always routable, so a keyless install degrades instead of
   failing.
 
-## Observed routing (reproduce with `apex route "<task>"`)
+## Observed routing (reproduce with `apex route "<task>" --all-available`)
+
+With every provider credentialed (the default run degrades to whatever keys you
+set, and to `mock/apex-mock` with none):
 
 | Task (as classified) | `balanced` | `quality` | `cheapest` |
 |---|---|---|---|
