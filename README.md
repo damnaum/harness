@@ -8,8 +8,8 @@ tracing/metrics and an evaluation suite — **on the Python standard library alo
 ```bash
 python -m apex --profile offline run "Write a Python function that returns the nth Fibonacci number"
 python -m apex models                 # the 2026 model registry, scored
-python -m apex route "Prove sqrt(2) is irrational"
-python -m apex eval                   # 8-task benchmark, pass rate + cost
+python -m apex route "Prove sqrt(2) is irrational" --all-available   # what frontier routing picks
+python -m apex eval                   # 11-task benchmark (3 run the generated code)
 python -m apex serve                  # HTTP API on :8000
 ```
 
@@ -40,7 +40,7 @@ budgeting) built in rather than bolted on.
 | Safety | Direct + indirect (tool-output) injection scans, PII redaction, output caps, deny-by-default tool approval, path sandbox that survives symlinks and sibling prefixes, SSRF gate, credential-free child env |
 | Cost | Per-run token and USD accounting, cheapest/quality/fast routing modes |
 | Debuggability | Nested spans, counters/histograms, structured JSON logs, `/v1/traces` grouped by trace |
-| Quality | Critic loop with retry-on-low-score, plus an 8-task eval suite you can wire into CI |
+| Quality | Critic loop with retry-on-low-score, plus an 11-task eval suite — three tasks execute the generated code in a sandbox and probe the results — gateable in CI with `--min-pass-rate` |
 
 ## Install
 
@@ -73,15 +73,15 @@ print(apex.doctor())
 ```
 apex run "<task>" [--json] [--strategy NAME] [--model ID]
 apex models [--provider NAME] [--json]   # registry with scores and prices
-apex route "<task>"                      # routing decision + classification
+apex route "<task>" [--json] [--all-available]   # decision + classification
 apex eval [--json] [--min-pass-rate R]   # benchmark suite, CI gate
 apex doctor                              # config, tools, providers, memory, health
 apex remember "<fact>"                   # durable memory
 apex serve [--host --port]               # HTTP API
 ```
 
-Global flags (`--profile`, `--workspace`, `--model`, `--config`) may appear **before or
-after** the subcommand. `--config` loads a JSON/YAML file; precedence is
+Global flags (`--profile`, `--workspace`, `--model`, `--config`, `--version`) may appear
+**before or after** the subcommand. `--config` loads a JSON/YAML file; precedence is
 defaults < profile < file < environment < CLI flags. `apex eval --min-pass-rate 0.95`
 exits non-zero when quality regresses, which makes it usable as a CI gate.
 
@@ -100,10 +100,14 @@ POST /v1/remember     {fact, source?}
 POST /v1/eval         {tasks?: [ids]}
 ```
 
-Set `APEX_API_TOKEN` to require `Authorization: Bearer <token>` on every route.
-`APEX_CORS_ORIGIN` controls `Access-Control-Allow-Origin` (default `*`). Bodies are capped
-at 1 MB, malformed JSON returns 400, unknown strategies return 400 with the allowed list,
-and unexpected failures return 500 with a stable error shape — never a stack trace.
+Set `APEX_API_TOKEN` to require `Authorization: Bearer <token>` on every route (compared in
+constant time). `APEX_CORS_ORIGIN` controls `Access-Control-Allow-Origin` (default `*`), and
+`APEX_MAX_CONCURRENCY` caps simultaneous `/v1/run` calls (default 4) — beyond that clients get
+`503 overloaded` with `Retry-After` instead of an unbounded queue. Bodies are capped at 1 MB,
+malformed JSON returns 400, unknown strategies return 400 with the allowed list, a fact that
+fails the guardrail scan returns 403, and unexpected failures return 500 with a stable error
+shape — never a stack trace. Idle sockets time out at 30 s and `SIGTERM` shuts down
+gracefully.
 
 ## Configuration
 
@@ -178,6 +182,9 @@ Offline it scores **100% pass, ~0.89 mean** — a regression baseline for the ha
 | Agent loops | Repeated-call fingerprint detection stops it |
 | Context grows | Biggest tool outputs summarised, oldest turns evicted, system kept |
 | Tool output contains instructions | Observation tagged `[UNTRUSTED DATA]` and the attempt recorded |
+| Memory file unwritable | Warning logged, run continues (persistence is best-effort) |
+| Memory file corrupt | Ignored on load, harness starts clean instead of crashing |
+| API saturated | `503 overloaded` + `Retry-After`, not an unbounded queue |
 | Crash | JSON checkpoint per run |
 | Corrupt memory file | Ignored on load; harness starts clean |
 
@@ -189,11 +196,12 @@ python -m pytest tests -q                   # if pytest is installed
 ruff check apex tests
 ```
 
-Suites (12 files): models/routing/classification · tools + sandbox security · reasoning +
-memory · execution (retry/breaker/checkpoint) · harness end-to-end + guardrails · offline
-provider behaviour · real-provider request/response contracts · memory persistence and
-eviction integrity · planner/swarm/synthesis · strategies and voting · config layering +
-SDK · observability · evaluation scorers · API and CLI integration.
+385 tests across 18 files: models/routing/classification · registry integrity ·
+tools + sandbox security · reasoning + memory · execution (retry/breaker/checkpoint) ·
+harness end-to-end + guardrails · offline provider behaviour · real-provider
+request/response contracts · memory persistence and eviction integrity ·
+planner/swarm/synthesis · strategies and voting · config layering + SDK · observability ·
+evaluation scorers · API hardening · API + CLI integration.
 
 ## Documentation
 

@@ -21,8 +21,10 @@ jobs:
         run: python -m pip install -e .
       - name: Unit + integration tests (offline, no keys)
         run: python -m unittest discover -s tests -v
-      - name: Eval suite regression gate
-        run: python -m apex --profile offline eval
+      - name: Byte-compile every module
+        run: python -m compileall -q apex tests examples
+      - name: Eval suite regression gate (fails below 95% pass)
+        run: python -m apex --profile offline eval --min-pass-rate 0.95
       - name: CLI smoke test
         run: |
           python -m apex doctor > /dev/null
